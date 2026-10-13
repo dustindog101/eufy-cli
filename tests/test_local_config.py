@@ -1,5 +1,7 @@
 from __future__ import annotations
 import json
+import os
+import subprocess
 import stat
 import tempfile
 import unittest
@@ -21,6 +23,37 @@ class LocalConfigTests(unittest.TestCase):
         self.device = AppCache.load(self.root).select(None)
         self.path = self.root / 'state' / 'local.json'
 
+    def assert_private_permissions(self, path, *, directory):
+        if os.name != 'nt':
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700 if directory else 0o600)
+            return
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath ([Console]::In.ReadToEnd())
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+$valid = $acl.AreAccessRulesProtected -and ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $sid) -and ($rules.Count -eq 1) -and ($rules[0].IdentityReference.Value -eq $sid) -and ($rules[0].AccessControlType -eq 'Allow') -and (($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)
+if (-not $valid) { exit 3 }
+"""
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], input=str(path.resolve()), text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, 'Windows ACL must grant only the owner full control without inheritance')
+
+    def test_failed_permissions_leave_existing_config_and_no_identifiers_in_temp(self):
+        local_config.save_from_device(self.device, self.path)
+        original = self.path.read_bytes()
+        calls = []
+        def refuse_file(path, *, directory):
+            calls.append(directory)
+            if not directory:
+                self.assertEqual(path.read_bytes(), b'')
+                raise local_config.LocalConfigError('permission failure')
+        with patch.object(local_config, '_private_permissions', side_effect=refuse_file):
+            with self.assertRaises(local_config.LocalConfigError):
+                local_config.update_host('10.254.50.26', self.path)
+        self.assertEqual(calls, [True, False])
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(list(self.path.parent.glob('.local-*')), [])
+
     def test_import_is_minimal_private_and_preserves_runtime_identity(self):
         self.device.record['password'] = 'never-copy-password'
         self.device.station['token'] = 'never-copy-token'
@@ -28,8 +61,8 @@ class LocalConfigTests(unittest.TestCase):
         text = self.path.read_text()
         for secret in ('never-copy-password', 'never-copy-token', 'synthetic-dsk-key', 'synthetic-cloud-address'):
             self.assertNotIn(secret, text)
-        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
+        self.assert_private_permissions(self.path, directory=False)
+        self.assert_private_permissions(self.path.parent, directory=True)
         loaded = local_config.load(self.path).select(None)
         before = build_payload(self.device, 'motion.get')
         after = build_payload(loaded, 'motion.get')
@@ -94,6 +127,7 @@ class LocalConfigTests(unittest.TestCase):
             app.assert_not_called()
         after = json.loads(self.path.read_text())
         self.assertEqual(after['station']['ip_addr'], host)
+        self.assert_private_permissions(self.path, directory=False)
         after['station']['ip_addr'] = before['station']['ip_addr']
         self.assertEqual(after, before)
         self.assertFalse(result['app_required_for_normal_commands'])

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -92,16 +93,51 @@ def save_from_device(device: CachedDevice, path: Path | None = None, *, replace:
     return _save(data, path)
 
 
+
+def _private_permissions(path: Path, *, directory: bool) -> None:
+    """Restrict the config to its owner using the operating system's permissions."""
+    if os.name != 'nt':
+        path.chmod(0o700 if directory else 0o600)
+        return
+    # Windows chmod does not remove other users' access. Replace the DACL,
+    # protecting it from inherited grants before any identifiers are written.
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+if ($request.directory) {
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+} else {
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')
+}
+$acl.SetAccessRuleProtection($true, $false)
+$acl.SetOwner($sid)
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $request.path -AclObject $acl
+"""
+    try:
+        subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+            input=json.dumps({'path': str(path.resolve()), 'directory': directory}),
+            text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise LocalConfigError('Could not restrict local config permissions; no identifiers were written') from None
+
+
 def _save(data: dict[str, Any], path: Path) -> Path:
     _validate(data)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
+    _private_permissions(path.parent, directory=True)
     temp_path = None
     try:
         fd, temp_name = tempfile.mkstemp(prefix='.local-', dir=path.parent)
         temp_path = Path(temp_name)
         with os.fdopen(fd, 'w') as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            _private_permissions(temp_path, directory=False)
             json.dump(data, stream, allow_nan=False, separators=(',', ':'))
             stream.flush()
             os.fsync(stream.fileno())

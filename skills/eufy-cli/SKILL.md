@@ -11,6 +11,7 @@ Use installed `eufy` for the user's requested supported action. It sends local P
 
 - Check `command -v eufy`, then `eufy --version`, `eufy limits` and, when relevant, `eufy help COMMAND`.
 - If missing, use the user's checkout or the installation instructions in the repository README: https://github.com/dustindog101/eufy-cli. Python3.11+, Node22+ and npm are required; keep launcher and backend together in the source checkout.
+- On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs and LAN discovery have been validated on Windows, but live status/control there remain unverified. A previously imported profile must be copied privately into an owner-only ACL-protected config directory; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
 - `eufy devices` shows aliases and models. Use `--device ALIAS` when the user names a device or selection is ambiguous.
 - Normal results are JSON. Runtime errors exit2 with `ok:false`. Do not interpret an error or unavailable value as a device state.
 

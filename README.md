@@ -24,6 +24,24 @@ ln -s "$(pwd)/bin/eufy" "$HOME/.local/bin/eufy"
 
 If a command named `eufy` already exists, inspect it before replacing it. Ensure `~/.local/bin` is on PATH.
 
+## Windows and SSH
+
+From PowerShell, install the same source checkout:
+
+```powershell
+git clone https://github.com/dustindog101/eufy-cli.git
+cd eufy-cli
+npm.cmd ci --ignore-scripts --no-audit --no-fund
+.\bin\eufy.cmd help
+.\bin\eufy.cmd discover --timeout 2
+```
+
+`python bin/eufy COMMAND` also works. Run locally on Windows or through an existing SSH connection; the Windows process sends UDP to the HomeBase, rather than forwarding camera traffic through the SSH client. The Windows host needs a working route to the HomeBase and permission for UDP replies. No firewall changes are made by this CLI.
+
+Windows cannot import the Mac app cache. Transfer your already configured `local.json` privately to `%USERPROFILE%\.config\eufy-cli\local.json` (or the equivalent under `XDG_CONFIG_HOME`). Protect the destination directory with an owner-only Windows ACL **before copying**. Do not place it in the Git checkout. Config writes use a protected ACL granting only the current Windows user access; Unix uses directory700/file600. Windows PowerShell is required for private configuration writes.
+
+The Windows launcher, configuration ACLs, all synthetic tests, and LAN discovery have been checked on a real Windows host. Fresh camera status and motion writes from Windows still require a configured profile and have not yet been live validated there.
+
 ## One-time setup
 
 On a Mac with existing saved Eufy app metadata:
@@ -34,7 +52,7 @@ eufy configure --from-app
 
 Use `--device ALIAS` if selection is ambiguous. An existing config is preserved unless `--replace` is explicitly supplied.
 
-The CLI stores only the HomeBase private IPv4 address, station serial/P2P identifier, protocol account identifier, and doorbell serial/channel/model/firmware metadata. It does not copy passwords, login tokens, cloud DSKs, private keys, events or app settings. Configuration is stored at `$XDG_CONFIG_HOME/eufy-cli/local.json`, or `~/.config/eufy-cli/local.json` when unset; the directory is owner-only700 and the file600. Never publish or upload this file.
+The CLI stores only the HomeBase private IPv4 address, station serial/P2P identifier, protocol account identifier, and doorbell serial/channel/model/firmware metadata. It does not copy passwords, login tokens, cloud DSKs, private keys, events or app settings. Configuration is stored at `$XDG_CONFIG_HOME/eufy-cli/local.json`, or `~/.config/eufy-cli/local.json` when unset; Unix uses directory700/file600; Windows config writes apply an owner-only protected ACL. Never publish or upload this file.
 
 Normal commands never fall back to the app if config is missing or invalid. Discovery alone cannot currently bootstrap all identifiers needed for control. A configured CLI has no GUI/IPC dependency; physical termination of the app and complete HomeBase WAN isolation have not been validated.
 
@@ -78,7 +96,7 @@ This sends one bounded LAN lookup and updates the address only after a reply mat
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
 
-Other models/firmware and live control on other operating systems are not verified. The local key derives from station serial and P2P DID, without a login-expiry timer; firmware, identity, permission or network changes can still break access. No promise of indefinite compatibility is made.
+Other models/firmware are not verified. Motion status/control have been live validated on macOS; Windows setup/tests/discovery are validated, but live status/control on Windows remain unverified. The local key derives from station serial and P2P DID, without a login-expiry timer; firmware, identity, permission or network changes can still break access. No promise of indefinite compatibility is made.
 
 An operation has a13-second shared budget plus up to1.5 seconds cleanup; the bridge timeout is20 seconds. Experimental history queries allow at most20 items and a start date at most30 days ago. Empty history output is not proof that no events exist. No complete pagination or encrypted-recording access is provided.
 
