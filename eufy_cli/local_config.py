@@ -15,6 +15,7 @@ from .cache import AppCache, CachedDevice
 DEFAULT_CONFIG_PATH = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'eufy-cli' / 'local.json'
 NETWORKS = tuple(ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 STATION_FIELDS = {'device_sn', 'device_model', 'device_type', 'main_sw_version', 'main_hw_version', 'p2p_did', 'ip_addr', 'member'}
+OPTIONAL_STATION_FIELDS = {'p2p_port'}
 DEVICE_FIELDS = {'device_sn', 'device_model', 'device_type', 'device_channel', 'station_sn', 'main_sw_version', 'main_hw_version'}
 
 
@@ -44,6 +45,12 @@ def _integer(value: Any) -> int:
     return value
 
 
+def _peer_port(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+        raise LocalConfigError('Local config contains an invalid peer UDP port')
+    return value
+
+
 def _validate(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or set(data) != {'version', 'alias', 'role', 'station', 'device'} or data.get('version') != 1:
         raise LocalConfigError('Local config schema is invalid')
@@ -51,8 +58,10 @@ def _validate(data: Any) -> dict[str, Any]:
     if data['role'] not in ('admin', 'guest', 'unknown'):
         raise LocalConfigError('Local config role is invalid')
     station, device = data['station'], data['device']
-    if not isinstance(station, dict) or set(station) != STATION_FIELDS or not isinstance(device, dict) or set(device) != DEVICE_FIELDS:
+    if not isinstance(station, dict) or set(station) not in (STATION_FIELDS, STATION_FIELDS | OPTIONAL_STATION_FIELDS) or not isinstance(device, dict) or set(device) != DEVICE_FIELDS:
         raise LocalConfigError('Local config metadata schema is invalid')
+    if 'p2p_port' in station:
+        _peer_port(station['p2p_port'])
     for obj in (station, device):
         for field in ('device_sn', 'device_model'):
             _text(obj[field])
@@ -175,5 +184,20 @@ def update_host(host: str, path: Path | None = None) -> Path:
         data = _validate(json.loads(path.read_text()))
     except (OSError, ValueError, TypeError, KeyError):
         raise LocalConfigError('Local config must exist before changing its HomeBase address') from None
+    if data['station']['ip_addr'] != host:
+        data['station'].pop('p2p_port', None)
     data['station']['ip_addr'] = host
+    return _save(data, path)
+
+
+def update_endpoint(host: str, port: int, path: Path | None = None) -> Path:
+    """Persist a fresh identity-matched local endpoint without replacing identity or role."""
+    port = _peer_port(port)
+    path = config_path(path)
+    try:
+        data = _validate(json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError, KeyError):
+        raise LocalConfigError('Local config must exist before updating its HomeBase endpoint') from None
+    data['station']['ip_addr'] = host
+    data['station']['p2p_port'] = port
     return _save(data, path)

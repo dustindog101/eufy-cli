@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from dataclasses import replace
 import json
 import sys
 from typing import Any
@@ -47,11 +48,12 @@ JSON for command results; human-readable help via eufy help COMMAND.""",
 
     help_command = commands.add_parser("help", help="show help without accessing the app cache")
     help_command.add_argument("topic", nargs="?", choices=("devices", "status", "refresh", "discover", "events", "motion", "limits", "configure"))
-    configure = commands.add_parser("configure", help="import minimal LAN identifiers once; no passwords/tokens/cloud keys",
-        description="Copy only needed identifiers from existing saved app metadata into the CLI's private config. Future commands read that config instead of the app. No login, cloud calls or device changes.")
+    configure = commands.add_parser("configure", help="import identifiers or refresh a verified LAN endpoint",
+        description="Copy only needed identifiers from existing saved app metadata, or refresh an existing standalone profile's verified LAN endpoint. No login, cloud calls or device changes.")
     config_source = configure.add_mutually_exclusive_group(required=True)
     config_source.add_argument("--from-app", action="store_true", help="explicit one-time import of existing saved app metadata")
-    config_source.add_argument("--host", help="update standalone HomeBase IP after a matching LAN discovery; no app access")
+    config_source.add_argument("--host", help="update standalone HomeBase IP and peer port after matching LAN discovery; no app access")
+    config_source.add_argument("--from-discovery", action="store_true", help="refresh the standalone HomeBase endpoint from one unique identity-matched broadcast reply")
     configure.add_argument("--device", help="cached device alias")
     configure.add_argument("--replace", action="store_true", help="replace existing config with a fresh one-time import")
     commands.add_parser("limits", help="show verified features, requirements and limits (no network)")
@@ -60,12 +62,14 @@ JSON for command results; human-readable help via eufy help COMMAND.""",
         epilog="With standalone config, change IP via eufy configure --host PRIVATE_IP (identity checked over LAN). Reimport identifiers only if needed using configure --from-app --replace. Refresh does not contact Eufy services.")
     refresh.add_argument("--device", help="cached device alias")
     refresh.add_argument("--cache-only", action="store_true", help="only reload saved local identifiers; no network, metadata stays stale")
+    refresh.add_argument("--discover", action="store_true", help="discover the current peer endpoint before a live LAN read")
 
     commands.add_parser("devices", help="list redacted devices from the app cache")
 
     status = commands.add_parser("status", help="show cached state, or fresh motion with --live", description="Without --live all values come from saved app metadata and are stale. --live queries fresh motion only; other fields remain cached.")
     status.add_argument("--device", help="cached device alias")
     status.add_argument("--live", action="store_true", help="read motion state from the local station over LAN")
+    status.add_argument("--discover", action="store_true", help="discover the current peer endpoint before a live LAN read")
 
     discovery = commands.add_parser("discover", help="send one local UDP discovery lookup")
     discovery.add_argument("--host", help="private IPv4 address for directed lookup")
@@ -110,6 +114,27 @@ def _selected(cache: AppCache, alias: str | None):
         raise CliError("device_selection_required", str(exc)) from exc
 
 
+def _matched_endpoint(probe: dict[str, Any], alias: str, *, host: str | None = None) -> tuple[str, int]:
+    responders = probe.get("responders")
+    if not isinstance(responders, list):
+        responders = []
+    endpoints: set[tuple[str, int]] = set()
+    for row in responders:
+        if not isinstance(row, dict) or row.get("matched_cached_device") is not True or row.get("device_alias") != alias:
+            continue
+        row_host, port = row.get("host"), row.get("port")
+        if host is not None and row_host != host:
+            continue
+        if not isinstance(row_host, str) or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise CliError("station_endpoint_invalid", "A matching discovery reply contained an invalid endpoint; endpoint was not used")
+        endpoints.add((row_host, port))
+    if not endpoints:
+        raise CliError("station_identity_not_verified", "No discovery reply matched the configured station; endpoint was not refreshed")
+    if len(endpoints) != 1:
+        raise CliError("station_endpoint_ambiguous", "Multiple matching station endpoints were found; endpoint was not refreshed")
+    return next(iter(endpoints))
+
+
 def _motion_value(device: Any) -> bool | None:
     status = device.public().get("status", {})
     motion = status.get("motion_detection", {})
@@ -138,24 +163,33 @@ def _limits() -> dict[str, Any]:
         "unresolved": {"event_history": "Local queries return empty despite app events; completeness unverified", "cached_logs": "App notification logs are opaque"},
         "unsupported": ["live_video", "recording_playback", "recording_download", "other_settings", "snooze", "security_modes", "discovery_only_control_bootstrap"],
         "metadata": {"standalone_configured": local_config.is_configured(), "app_cache_read_in_standalone_mode": False, "reloaded_each_command": True, "app_cache_updated_by_cli": False, "refresh_live_fields": ["motion_detection"], "app_must_be_running": False, "saved_app_cache_required": False, "one_time_import_uses_saved_app_metadata": True, "standalone_config_required": True, "cloud_dsk_required": False, "known_metadata_expiry_limit": None, "expiry_note": "No DSK expiry dependency; continued access after permission, identity, firmware or network changes is not guaranteed"},
-        "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "wire_protocol": "proprietary Eufy P2P"},
-        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "event_items_max": 20, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10]},
+        "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "explicit_live_discovery": "status --live --discover or refresh --discover adds one identity-matched broadcast; profile unchanged", "wire_protocol": "proprietary Eufy P2P"},
+        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "event_items_max": 20, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10], "live_discovery_seconds": 2},
         "writes": {"requires_admin": True, "unknown_shared_role_requires": "--shared-admin", "explicit_guest_blocked": True, "reads_original_and_result": True, "leaves_requested_state": True, "no_op_when_already_matching": True, "automatic_restore_for_normal_commands": False},
         "output": {"normal_commands": "JSON", "help": "human readable", "success_exit": 0, "errors_exit": 2},
     }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    discover_for_read = getattr(args, "discover", False)
+    if args.command == "status" and discover_for_read and not getattr(args, "live", False):
+        raise CliError("invalid_option_combination", "status --discover requires --live")
+    if args.command == "refresh" and discover_for_read and getattr(args, "cache_only", False):
+        raise CliError("invalid_option_combination", "refresh --discover cannot be used with --cache-only")
     if args.command == "configure":
         try:
-            if args.host:
+            if args.host is not None:
                 cache = local_config.load()
                 device = _selected(cache, args.device)
                 probe = discover(host=args.host, timeout=2, cache=cache)
-                matched = any(row["host"] == args.host and row["matched_cached_device"] and row["device_alias"] == device.alias for row in probe["responders"])
-                if not matched:
-                    raise CliError("station_identity_not_verified", "No reply matching the configured station; address was not changed")
-                path = local_config.update_host(args.host)
+                endpoint_host, endpoint_port = _matched_endpoint(probe, device.alias, host=args.host)
+                path = local_config.update_endpoint(endpoint_host, endpoint_port)
+            elif getattr(args, "from_discovery", False):
+                cache = local_config.load()
+                device = _selected(cache, args.device)
+                probe = discover(timeout=2, cache=cache)
+                endpoint_host, endpoint_port = _matched_endpoint(probe, device.alias)
+                path = local_config.update_endpoint(endpoint_host, endpoint_port)
             else:
                 device = _selected(AppCache.load(), args.device)
                 path = local_config.save_from_device(device, replace=args.replace)
@@ -185,14 +219,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device = _selected(cache, args.device)
         public = device.public()
         is_refresh = args.command == "refresh"
-        live = not args.cache_only if is_refresh else args.live
+        live = not getattr(args, "cache_only", False) if is_refresh else getattr(args, "live", False)
         output = {"ok": True, "device": public}
         if is_refresh:
             output["refresh"] = {"metadata_reloaded": True, "metadata_source": getattr(cache, "metadata_source", "app_cache"), "app_refresh_triggered": False, "app_cache_modified": False, "requested_at": dt.datetime.now(dt.timezone.utc).isoformat(), "metadata_stale": True, "fresh_fields": ["motion_detection"] if live else []}
         if not live:
             return output
         try:
-            response = run_backend(build_payload(device, "motion.get"))
+            live_device = device
+            if discover_for_read:
+                try:
+                    probe = discover(timeout=2, cache=cache)
+                except DiscoveryError as exc:
+                    raise CliError("discovery_failed", str(exc)) from exc
+                endpoint_host, endpoint_port = _matched_endpoint(probe, device.alias)
+                live_device = replace(device, station={**device.station, "ip_addr": endpoint_host, "p2p_port": endpoint_port})
+            response = run_backend(build_payload(live_device, "motion.get"))
         except BackendError as exc:
             raise CliError(exc.code, str(exc)) from exc
         result = response.get("result")

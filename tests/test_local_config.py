@@ -109,6 +109,60 @@ if (-not $valid) { exit 3 }
             self.path.write_text(json.dumps(data))
             with self.assertRaises(local_config.LocalConfigError): local_config.load(self.path)
 
+    def test_legacy_profile_without_peer_port_remains_valid(self):
+        local_config.save_from_device(self.device, self.path)
+        loaded = local_config.load(self.path).select(None)
+        payload = build_payload(loaded, 'motion.get')
+        self.assertNotIn('p2p_port', loaded.station)
+        self.assertNotIn('peerPort', payload['station']['local'])
+
+    def test_optional_peer_port_is_validated_and_forwarded(self):
+        local_config.save_from_device(self.device, self.path)
+        original = json.loads(self.path.read_text())
+        for invalid in (True, False, 0, 65536, '32108'):
+            with self.subTest(port=invalid):
+                data = json.loads(json.dumps(original))
+                data['station']['p2p_port'] = invalid
+                self.path.write_text(json.dumps(data))
+                with self.assertRaises(local_config.LocalConfigError):
+                    local_config.load(self.path)
+        self.path.write_text(json.dumps(original))
+        updated = json.loads(self.path.read_text())
+        updated['station']['p2p_port'] = 51800
+        self.path.write_text(json.dumps(updated))
+        payload = build_payload(local_config.load(self.path).select(None), 'motion.get')
+        self.assertEqual(payload['station']['local']['peerPort'], 51800)
+
+    def test_invalid_endpoint_port_does_not_write_config(self):
+        local_config.save_from_device(self.device, self.path)
+        original = self.path.read_bytes()
+        for invalid in (True, False, 0, 65536, '51800'):
+            with self.subTest(port=invalid):
+                with self.assertRaises(local_config.LocalConfigError):
+                    local_config.update_endpoint('10.254.50.26', invalid, self.path)
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_update_endpoint_preserves_profile_identity_and_role(self):
+        self.device.role = 'admin'
+        local_config.save_from_device(self.device, self.path)
+        before = json.loads(self.path.read_text())
+        host, port = '10.254.50.26', 51800
+        local_config.update_endpoint(host, port, self.path)
+        after = json.loads(self.path.read_text())
+        expected = json.loads(json.dumps(before))
+        expected['station']['ip_addr'] = host
+        expected['station']['p2p_port'] = port
+        self.assertEqual(after, expected)
+        self.assertEqual(local_config.load(self.path).select(None).role, 'admin')
+
+    def test_legacy_host_update_removes_stale_peer_port_only_when_host_changes(self):
+        local_config.save_from_device(self.device, self.path)
+        local_config.update_endpoint('10.254.50.25', 51800, self.path)
+        local_config.update_host('10.254.50.25', self.path)
+        self.assertEqual(json.loads(self.path.read_text())['station']['p2p_port'], 51800)
+        local_config.update_host('10.254.50.26', self.path)
+        self.assertNotIn('p2p_port', json.loads(self.path.read_text())['station'])
+
     def test_existing_config_is_preserved_until_explicit_replace(self):
         local_config.save_from_device(self.device, self.path)
         original = self.path.read_bytes()
@@ -123,14 +177,16 @@ if (-not $valid) { exit 3 }
         before = json.loads(self.path.read_text())
         host = '10.254.50.26'
         args = type('Args', (), {'command': 'configure', 'host': host, 'from_app': False, 'device': None, 'replace': False})()
-        reply = {'responders': [{'host': host, 'matched_cached_device': True, 'device_alias': self.device.alias}]}
+        reply = {'responders': [{'host': host, 'port': 51800, 'matched_cached_device': True, 'device_alias': self.device.alias}]}
         with patch.object(local_config, 'DEFAULT_CONFIG_PATH', self.path), patch.object(AppCache, 'load', side_effect=AssertionError('No app reads')) as app, patch('eufy_cli.cli.discover', return_value=reply):
             result = run(args)
             app.assert_not_called()
         after = json.loads(self.path.read_text())
         self.assertEqual(after['station']['ip_addr'], host)
+        self.assertEqual(after['station']['p2p_port'], 51800)
         self.assert_private_permissions(self.path, directory=False)
         after['station']['ip_addr'] = before['station']['ip_addr']
+        after['station'].pop('p2p_port')
         self.assertEqual(after, before)
         self.assertFalse(result['app_required_for_normal_commands'])
 

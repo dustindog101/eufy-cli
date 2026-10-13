@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import dgram from 'node:dgram';
+import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import {
   BackendError,
@@ -11,6 +12,7 @@ import {
   isPrivateIPv4,
   makeOfflineApi,
   normalizeInput,
+  primePeerOnListen,
   normalizeStationDeviceType,
   sanitizeEventRecords,
   udpDestination,
@@ -272,4 +274,42 @@ test('motion setting requires a fresh original, matching ACK and independent fre
   assert.equal(writes, 1);
   assert.equal(station.listenerCount('command result'), 0);
   assert.equal(station.listenerCount('raw device property changed'), 0);
+});
+
+
+test('identity-matched peer port is optional and invalid values fail before sockets', async () => {
+  const legacy = request();
+  assert.equal(normalizeInput(legacy).peerPort, undefined);
+  legacy.station.local.peerPort = 25000;
+  assert.equal(normalizeInput(legacy).peerPort, 25000);
+  for (const port of [0, -1, 65536, 1.5, '25000', true, null]) {
+    legacy.station.local.peerPort = port;
+    await assert.rejects(executeRequest(legacy), (error) => error.code === 'INVALID_REQUEST');
+  }
+});
+
+test('peer flow is primed once on the SDK socket before lookup and keeps the pinned-host guard', () => {
+  const sent = [];
+  const originalSend = dgram.Socket.prototype.send;
+  dgram.Socket.prototype.send = function (...args) { sent.push(args); };
+  const guard = installEgressGuards('10.254.50.20');
+  try {
+    const socket = new EventEmitter();
+    socket.send = dgram.Socket.prototype.send;
+    primePeerOnListen(socket, '10.254.50.20', 25000);
+    socket.once('listening', () => socket.send(Buffer.from('f13000020000', 'hex'), 32108, '10.254.50.20'));
+    assert.equal(sent.length, 0);
+    socket.emit('listening');
+    assert.deepEqual(sent.map((args) => [args[0].length, args[1], args[2]]), [[0, 25000, '10.254.50.20'], [6, 32108, '10.254.50.20']]);
+    socket.emit('listening');
+    assert.equal(sent.length, 2);
+    primePeerOnListen(socket, '10.254.50.21', 25000);
+    socket.emit('listening');
+    assert.equal(guard.denied.length, 1);
+    assert.equal(sent.length, 2);
+    assert.equal(socket.listenerCount('listening'), 0);
+  } finally {
+    guard.restore();
+    dgram.Socket.prototype.send = originalSend;
+  }
 });

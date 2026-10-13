@@ -40,7 +40,18 @@ npm.cmd ci --ignore-scripts --no-audit --no-fund
 
 Windows cannot import the Mac app cache. Transfer your already configured `local.json` privately to `%USERPROFILE%\.config\eufy-cli\local.json` (or the equivalent under `XDG_CONFIG_HOME`). Protect the destination directory with an owner-only Windows ACL **before copying**. Do not place it in the Git checkout. Config writes use a protected ACL granting only the current Windows user access; Unix uses directory700/file600. Windows PowerShell is required for private configuration writes.
 
-The Windows launcher, configuration ACLs, all synthetic tests, and LAN discovery have been checked on a real Windows host. On one tested Windows LAN host, a configured profile matched the HomeBase in broadcast discovery, but directed UDP and live status timed out; Windows reported the station neighbor as unreachable. Fresh status/control on Windows remain unverified. Check direct LAN reachability before attributing a timeout to login or permissions.
+After transferring a profile, use an identity-matched lookup before each live read:
+
+```powershell
+.\bin\eufy.cmd status --live --discover
+.\bin\eufy.cmd refresh --discover
+```
+
+The explicit `--discover` option broadcasts once, requires one endpoint matching the configured station identity, then uses that IP/UDP response port in memory for the live read. It preserves the profile, device/account identifiers and permissions, and refuses missing or ambiguous matches. It cannot provision a blank config. `configure --from-discovery` is available separately to persist a matched endpoint.
+
+HomeBase lookup replies can use a different UDP source port than the request to32108. Some stateful firewalls discard those replies. The matched response port lets the CLI establish an outbound flow on its own socket before the SDK's normal lookup, without changing firewall settings. The backend still sends only to the selected HomeBase IP; broadcast occurs only in explicit discovery/setup or an opted-in live `--discover` read. See [Microsoft's UDP flow documentation](https://learn.microsoft.com/en-us/windows/win32/fwp/ale-stateful-filtering).
+
+The response port can change between connections, so a saved port alone is insufficient on some stateful firewalls. Use `--discover` for repeated Windows live reads. Windows launcher/config permissions, synthetic tests, and repeated fresh motion reads with `--discover` are live verified. Windows motion writes have not been tested.
 
 ## One-time setup
 
@@ -52,7 +63,7 @@ eufy configure --from-app
 
 Use `--device ALIAS` if selection is ambiguous. An existing config is preserved unless `--replace` is explicitly supplied.
 
-The CLI stores only the HomeBase private IPv4 address, station serial/P2P identifier, protocol account identifier, and doorbell serial/channel/model/firmware metadata. It does not copy passwords, login tokens, cloud DSKs, private keys, events or app settings. Configuration is stored at `$XDG_CONFIG_HOME/eufy-cli/local.json`, or `~/.config/eufy-cli/local.json` when unset; Unix uses directory700/file600; Windows config writes apply an owner-only protected ACL. Never publish or upload this file.
+The CLI stores only the HomeBase private IPv4 address, station serial/P2P identifier, optional discovered UDP response port, protocol account identifier, and doorbell serial/channel/model/firmware metadata. It does not copy passwords, login tokens, cloud DSKs, private keys, events or app settings. Configuration is stored at `$XDG_CONFIG_HOME/eufy-cli/local.json`, or `~/.config/eufy-cli/local.json` when unset; Unix uses directory700/file600; Windows config writes apply an owner-only protected ACL. Never publish or upload this file.
 
 Normal commands never fall back to the app if config is missing or invalid. Discovery alone cannot currently bootstrap all identifiers needed for control. A configured CLI has no GUI/IPC dependency; physical termination of the app and complete HomeBase WAN isolation have not been validated.
 
@@ -81,24 +92,27 @@ If the HomeBase IP changes:
 
 ```sh
 eufy configure --host PRIVATE_IP
+# Or match the existing station via one broadcast and refresh its IP/UDP port:
+eufy configure --from-discovery
 ```
 
-This sends one bounded LAN lookup and updates the address only after a reply matches the configured station identifier. It does not read the app or change network settings.
+Both options send one bounded LAN lookup and update the endpoint only after a reply matches the configured station identifier. `--from-discovery` uses broadcast; `--host` uses the supplied private address. It does not read the app or change network settings.
 
 ## Support and limits
 
 | Feature | Status |
 | --- | --- |
-| Fresh motion status; motion on/off with readback | Live validated on T8210 firmware2.2.4.6 + T8010 firmware3.4.2.6h |
+| Fresh motion status | Live validated on macOS and Windows for T8210 firmware2.2.4.6 + T8010 firmware3.4.2.6h |
+| Motion on/off with readback | Live validated on macOS for that pair; Windows writes not tested |
 | App-file-independent runtime | Live validated with app-cache loading blocked |
 | Local discovery; standalone IP maintenance | Implemented, identity-checked |
 | Event history | Unresolved: local queries can return empty despite app events |
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
 
-Other models/firmware are not verified. Motion status/control have been live validated on macOS; Windows setup/tests/discovery are validated, but live status/control on Windows remain unverified. The local key derives from station serial and P2P DID, without a login-expiry timer; firmware, identity, permission or network changes can still break access. No promise of indefinite compatibility is made.
+Other models/firmware are not verified. Motion status has been live validated on macOS and Windows; motion changes have been live validated on macOS, with Windows writes unverified. The local key derives from station serial and P2P DID, without a login-expiry timer; firmware, identity, permission or network changes can still break access. No promise of indefinite compatibility is made.
 
-An operation has a13-second shared budget plus up to1.5 seconds cleanup; the bridge timeout is20 seconds. Experimental history queries allow at most20 items and a start date at most30 days ago. Empty history output is not proof that no events exist. No complete pagination or encrypted-recording access is provided.
+An operation has a13-second shared budget plus up to1.5 seconds cleanup; opted-in live discovery adds one bounded2-second lookup; the bridge timeout is20 seconds. Experimental history queries allow at most20 items and a start date at most30 days ago. Empty history output is not proof that no events exist. No complete pagination or encrypted-recording access is provided.
 
 Normal results are JSON; runtime failures return an `ok:false` error and exit2. Help is human-readable. `eufy limits` lists current capabilities and budgets without network access.
 

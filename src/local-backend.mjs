@@ -103,6 +103,7 @@ export function normalizeInput(input) {
   // This adapter never forwards the app's cached DSK. The SDK can still try
   // its local lookup; its DSK refresh path is disabled by the offline API.
   const dskKey = '';
+  const peerPort = localInput.peerPort === undefined ? undefined : safeInteger(localInput.peerPort, 'local peer port', 1, 65535);
   const dskExpirationMs = localInput.dskExpirationMs === undefined || localInput.dskExpirationMs === null
     ? null
     : localInput.dskExpirationMs;
@@ -178,7 +179,7 @@ export function normalizeInput(input) {
       device_channel: deviceChannel,
     }],
   };
-  return { operation, role: input.role, host, dskKey, dskExpirationMs, station: safeStation, device: safeDevice, query, value: input.value };
+  return { operation, role: input.role, host, peerPort, dskKey, dskExpirationMs, station: safeStation, device: safeDevice, query, value: input.value };
 }
 
 function parseLocalDate(value, field) {
@@ -482,6 +483,16 @@ function clearSessionTimers(session) {
   }
 }
 
+export function primePeerOnListen(socket, host, peerPort) {
+  if (peerPort === undefined) return;
+  if (!isPrivateIPv4(host)) fail('INVALID_LOCAL_ADDRESS', 'The station address must be a private IPv4 address.');
+  safeInteger(peerPort, 'local peer port', 1, 65535);
+  // Local lookup replies originate from the station's P2P port, not 32108.
+  // Establish that outbound UDP flow before the SDK's normal lookup, so
+  // stateful host firewalls accept the reply without a firewall rule.
+  socket.once('listening', () => socket.send(Buffer.alloc(0), peerPort, host, () => {}));
+}
+
 async function createLocalStation(request, api, diagnostics) {
   const station = await Station.getInstance(api, request.station, request.host);
   station.initialize();
@@ -491,6 +502,7 @@ async function createLocalStation(request, api, diagnostics) {
   station.p2pSession.dskKey = request.dskKey;
   station.p2pSession.dskExpiration = request.dskExpirationMs === null ? null : new Date(request.dskExpirationMs);
   bindSocketToHost(station.p2pSession.socket, request.host, diagnostics);
+  primePeerOnListen(station.p2pSession.socket, request.host, request.peerPort);
   return station;
 }
 

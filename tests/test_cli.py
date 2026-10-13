@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from eufy_cli import local_config
 from eufy_cli.archive import KeyedArchiveDecoder, load_archive
 from eufy_cli.backend import build_payload
 from eufy_cli.cache import AppCache
@@ -242,6 +243,193 @@ class DiscoveryTests(unittest.TestCase):
             discover(host="0.0.0.0")
         with self.assertRaises(DiscoveryError):
             discover(timeout=float("nan"))
+
+
+class ConfigureEndpointTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.app_root = self.root / "app"
+        self.app_root.mkdir()
+        (self.app_root / "cache_BCDevicesMan").write_bytes(device_archive())
+        self.config_path = self.root / "config" / "local.json"
+        device = AppCache.load(self.app_root).select(None)
+        device.role = "admin"
+        self.alias = device.alias
+        local_config.save_from_device(device, self.config_path)
+        self.original = self.config_path.read_bytes()
+
+    def _run_discovery(self, responders):
+        output = io.StringIO()
+        with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), \
+                patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
+                patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
+                redirect_stdout(output):
+            code = main(["configure", "--from-discovery"])
+        app_loader.assert_not_called()
+        self.assertEqual(probe.call_args.kwargs["timeout"], 2)
+        self.assertIsNotNone(probe.call_args.kwargs["cache"])
+        self.assertEqual(probe.call_args.kwargs["cache"].metadata_source, "standalone_config")
+        return code, json.loads(output.getvalue())
+
+    def test_from_discovery_saves_one_unique_matched_endpoint_and_preserves_profile(self) -> None:
+        host, port = "10.254.50.26", 51800
+        matched = {"host": host, "port": port, "matched_cached_device": True, "device_alias": self.alias}
+        code, result = self._run_discovery([
+            matched,
+            dict(matched),
+            {"host": "10.254.50.27", "port": 51801, "matched_cached_device": False, "device_alias": None},
+        ])
+        self.assertEqual(code, 0)
+        self.assertTrue(result["ok"])
+        before = json.loads(self.original)
+        after = json.loads(self.config_path.read_text())
+        self.assertEqual(after["alias"], before["alias"])
+        self.assertEqual(after["role"], before["role"])
+        self.assertEqual(after["device"], before["device"])
+        self.assertEqual(after["station"]["device_sn"], before["station"]["device_sn"])
+        self.assertEqual(after["station"]["p2p_did"], before["station"]["p2p_did"])
+        self.assertEqual(after["station"]["member"], before["station"]["member"])
+        self.assertEqual(after["station"]["ip_addr"], host)
+        self.assertEqual(after["station"]["p2p_port"], port)
+
+    def test_from_discovery_without_identity_match_preserves_config(self) -> None:
+        code, result = self._run_discovery([
+            {"host": "10.254.50.26", "port": 51800, "matched_cached_device": False, "device_alias": None},
+        ])
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"]["code"], "station_identity_not_verified")
+        self.assertEqual(self.config_path.read_bytes(), self.original)
+
+    def test_from_discovery_with_multiple_unique_endpoints_preserves_config(self) -> None:
+        code, result = self._run_discovery([
+            {"host": "10.254.50.26", "port": 51800, "matched_cached_device": True, "device_alias": self.alias},
+            {"host": "10.254.50.27", "port": 51801, "matched_cached_device": True, "device_alias": self.alias},
+        ])
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"]["code"], "station_endpoint_ambiguous")
+        self.assertEqual(self.config_path.read_bytes(), self.original)
+
+    def test_invalid_profile_peer_port_fails_before_backend(self) -> None:
+        data = json.loads(self.config_path.read_text())
+        data["station"]["p2p_port"] = True
+        self.config_path.write_text(json.dumps(data))
+        args = type("Args", (), {"command": "status", "device": None, "live": True})()
+        with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), patch("eufy_cli.cli.run_backend") as backend:
+            with self.assertRaises(CliError) as raised:
+                run(args)
+        self.assertEqual(raised.exception.code, "local_config_invalid")
+        backend.assert_not_called()
+
+    def test_invalid_profile_peer_port_fails_before_discovery_or_write(self) -> None:
+        data = json.loads(self.config_path.read_text())
+        data["station"]["p2p_port"] = 0
+        self.config_path.write_text(json.dumps(data))
+        original = self.config_path.read_bytes()
+        output = io.StringIO()
+        with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), \
+                patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
+                patch("eufy_cli.cli.discover") as probe, redirect_stdout(output):
+            code = main(["configure", "--from-discovery"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "local_config_import_failed")
+        app_loader.assert_not_called()
+        probe.assert_not_called()
+        self.assertEqual(self.config_path.read_bytes(), original)
+
+
+class LiveDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.app_root = self.root / "app"
+        self.app_root.mkdir()
+        (self.app_root / "cache_BCDevicesMan").write_bytes(device_archive())
+        self.config_path = self.root / "config" / "local.json"
+        device = AppCache.load(self.app_root).select(None)
+        device.role = "admin"
+        self.alias = device.alias
+        local_config.save_from_device(device, self.config_path)
+        self.original = self.config_path.read_bytes()
+
+    def _run_live_read(self, argv, responders):
+        output = io.StringIO()
+        response = {"ok": True, "result": {"enabled": True, "fresh": True, "source": "local-p2p"}}
+        with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), \
+                patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
+                patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
+                patch("eufy_cli.cli.run_backend", return_value=response) as backend, \
+                redirect_stdout(output):
+            code = main(argv)
+        app_loader.assert_not_called()
+        return code, json.loads(output.getvalue()), probe, backend
+
+    def test_live_status_and_refresh_use_unique_discovered_endpoint_in_memory(self) -> None:
+        host, port = "10.254.50.26", 51800
+        responders = [
+            {"host": host, "port": port, "matched_cached_device": True, "device_alias": self.alias},
+            {"host": host, "port": port, "matched_cached_device": True, "device_alias": self.alias},
+            {"host": "10.254.50.27", "port": 51801, "matched_cached_device": False, "device_alias": None},
+        ]
+        for argv in (["status", "--live", "--discover"], ["refresh", "--discover"]):
+            with self.subTest(command=argv[0]):
+                before = self.config_path.read_bytes()
+                code, result, probe, backend = self._run_live_read(argv, responders)
+                self.assertEqual(code, 0)
+                self.assertTrue(result["ok"])
+                probe.assert_called_once()
+                self.assertEqual(probe.call_args.kwargs["timeout"], 2)
+                self.assertEqual(probe.call_args.kwargs["cache"].metadata_source, "standalone_config")
+                payload = backend.call_args.args[0]
+                self.assertEqual(payload["station"]["local"]["host"], host)
+                self.assertEqual(payload["station"]["local"]["peerPort"], port)
+                self.assertEqual(payload["station"]["raw"]["station_sn"], "synthetic-station-serial")
+                self.assertEqual(payload["station"]["raw"]["p2p_did"], "synthetic-local-did")
+                self.assertEqual(payload["device"]["device_sn"], "synthetic-doorbell-serial")
+                self.assertEqual(payload["role"], "admin")
+                backend.assert_called_once()
+                self.assertEqual(self.config_path.read_bytes(), before)
+                self.assertEqual(before, self.original)
+
+    def test_live_discovery_no_or_ambiguous_match_fails_before_backend(self) -> None:
+        cases = (
+            ([], "station_identity_not_verified"),
+            ([
+                {"host": "10.254.50.26", "port": 51800, "matched_cached_device": True, "device_alias": self.alias},
+                {"host": "10.254.50.27", "port": 51801, "matched_cached_device": True, "device_alias": self.alias},
+            ], "station_endpoint_ambiguous"),
+        )
+        for responders, expected_code in cases:
+            with self.subTest(error=expected_code):
+                before = self.config_path.read_bytes()
+                output = io.StringIO()
+                with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), \
+                        patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
+                        patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
+                        patch("eufy_cli.cli.run_backend") as backend, redirect_stdout(output):
+                    code = main(["status", "--live", "--discover"])
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(output.getvalue())["error"]["code"], expected_code)
+                app_loader.assert_not_called()
+                probe.assert_called_once()
+                backend.assert_not_called()
+                self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_invalid_discover_option_combinations_fail_before_io(self) -> None:
+        for argv in (["status", "--discover"], ["refresh", "--cache-only", "--discover"]):
+            with self.subTest(argv=argv):
+                output = io.StringIO()
+                with patch.object(local_config, "load") as load_config, \
+                        patch("eufy_cli.cli.discover") as probe, \
+                        patch("eufy_cli.cli.run_backend") as backend, redirect_stdout(output):
+                    code = main(argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(output.getvalue())["error"]["code"], "invalid_option_combination")
+                load_config.assert_not_called()
+                probe.assert_not_called()
+                backend.assert_not_called()
 
 
 class EventTests(unittest.TestCase):

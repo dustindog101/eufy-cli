@@ -105,13 +105,19 @@ def build_payload(device: CachedDevice, operation: str, *, query: dict[str, Any]
             "member_type": member.get("_member_type", member.get("member_type", -1)),
         },
     }
+    local_endpoint = {"host": local_host, "dskKey": key, "dskExpirationMs": expiration}
+    if device.metadata_source == "standalone_config" and "p2p_port" in station:
+        peer_port = station["p2p_port"]
+        if isinstance(peer_port, bool) or not isinstance(peer_port, int) or not 1 <= peer_port <= 65535:
+            raise BackendError("local_endpoint_invalid", "cached peer UDP port is invalid")
+        local_endpoint["peerPort"] = peer_port
     payload: dict[str, Any] = {
         "version": 1,
         "operation": operation,
         "role": device.role,
         "station": {
             "raw": station_raw,
-            "local": {"host": local_host, "dskKey": key, "dskExpirationMs": expiration},
+            "local": local_endpoint,
         },
         "device": target,
     }
