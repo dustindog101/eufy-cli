@@ -1,6 +1,6 @@
 ---
 name: eufy-cli
-description: Use the Eufy CLI to answer questions about a configured Eufy doorbell, check fresh motion detection status, enable or disable motion detection, and troubleshoot local setup or discovery. Applies to the CLI's supported T8210/T8010 pair; live video, event playback and other settings are not implemented.
+description: Use the Eufy CLI to answer questions about a configured Eufy doorbell, check fresh motion detection status, enable or disable motion detection, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to the CLI's supported T8210/T8010 pair; live video, event playback and other settings are not implemented.
 ---
 
 # Eufy CLI
@@ -11,7 +11,7 @@ Use installed `eufy` for the user's requested supported action. It sends local P
 
 - Check `command -v eufy`, then `eufy --version`, `eufy limits` and, when relevant, `eufy help COMMAND`.
 - If missing, use the user's checkout or the installation instructions in the repository README: https://github.com/dustindog101/eufy-cli. Python3.11+, Node22+ and npm are required; keep launcher and backend together in the source checkout.
-- On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs, LAN discovery, and repeated fresh motion reads have been validated on Windows. Windows motion writes have not been live tested. For Windows live reads, use `status --live --discover` or `refresh --discover`. This performs one explicit identity-matched broadcast and uses the current response port only in memory, without rewriting the profile. The port can change between sessions; a saved port alone may not suffice. The backend stays pinned to the selected HomeBase IP. Do not infer account expiry or change firewall/routes incidentally. A previously imported profile must be copied privately into an owner-only ACL-protected config directory; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
+- On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs, LAN discovery, and repeated fresh motion reads have been validated on Windows. Windows motion writes have not been live tested. For Windows live reads, use `status --live --discover` or `refresh --discover`. This performs one explicit identity-matched broadcast and uses the current response port only in memory, without rewriting the profile. The port can change between sessions; a saved port alone may not suffice. The backend stays pinned to the selected HomeBase IP. Do not infer account expiry or change firewall/routes incidentally. Use `session export FILE` and `session import FILE` to transfer a previously configured profile privately; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
 - `eufy devices` shows aliases and models. Use `--device ALIAS` when the user names a device or selection is ambiguous.
 - Normal results are JSON. Runtime errors exit2 with `ok:false`. Do not interpret an error or unavailable value as a device state.
 
@@ -48,6 +48,17 @@ eufy refresh --cache-only
 Setup imports only the needed identifiers from existing saved Mac app metadata into an owner-private config outside the checkout. It does not log in. Do this for an authorized setup request; preserve an existing config unless replacement is requested. `--replace` explicitly reimports identifiers. Normal commands never fall back to the app if config is missing or invalid.
 
 For an IP/response-port change, `configure --host` (directed) or `configure --from-discovery` (one broadcast) requires a unique matching configured-station reply before updating the local endpoint. The latter also saves the UDP response port used to establish the outbound reply flow. It can change between connections; use the explicit `--discover` flag for each Windows live read. Reject `--discover` with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
+
+## Portable session/profile transfer
+
+```sh
+eufy session export PRIVATE_PROFILE.json
+eufy session import PRIVATE_PROFILE.json
+```
+
+Use these for an authorized transfer between the user's trusted machines. Transfer the file over a private channel such as SSH/SFTP; never paste or publish its contents. Export is unencrypted and contains private device/account identifiers, not login cookies or tokens. Import validates the versioned file offline and installs it with owner-only permissions. No app access, cloud/login calls or camera changes occur. Verify LAN access separately with `status --live --discover`.
+
+Preserve existing profiles by default. Use import `--replace` only for an authorized replacement; use export `--overwrite` only when replacing that output is intended. Invalid imports and failed atomic saves preserve the previous profile. Preserve the transferred role/identifiers exactly; importing does not grant Admin access. Transfer to another host still needs authorization. On Windows use the checkout launcher described above.
 
 ## Limits and private diagnostics
 

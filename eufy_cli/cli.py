@@ -15,7 +15,7 @@ from .backend import BackendError, build_payload, run_backend
 from .cache import AppCache
 from .discovery import DiscoveryError, discover
 from .events import EventError, parse_since, read_cache_events, read_local_events
-from . import local_config
+from . import local_config, session_transfer
 
 
 class CliError(RuntimeError):
@@ -31,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
         epilog="""Examples:
   eufy status --live                         Fresh LAN motion status
   eufy configure --from-app                 One-time private identifier import
+  eufy session export PRIVATE_FILE.json      Export a portable private profile
+  eufy session import PRIVATE_FILE.json      Import without app access or login
   eufy refresh                               Reload local identifiers + fresh motion
   eufy motion off --shared-admin --dry-run   Preview only
   eufy motion off --shared-admin             Turn motion off and verify
@@ -47,7 +49,16 @@ JSON for command results; human-readable help via eufy help COMMAND.""",
     commands = parser.add_subparsers(dest="command", required=True)
 
     help_command = commands.add_parser("help", help="show help without accessing the app cache")
-    help_command.add_argument("topic", nargs="?", choices=("devices", "status", "refresh", "discover", "events", "motion", "limits", "configure"))
+    help_command.add_argument("topic", nargs="?", choices=("devices", "status", "refresh", "discover", "events", "motion", "limits", "configure", "session"))
+    session = commands.add_parser("session", help="export/import private standalone identifiers; no login or network",
+        description="Move the configured local profile between trusted machines. The JSON file contains private device/account identifiers, not login cookies, passwords or tokens. Transfer it privately. Import validates locally without contacting the camera or app.")
+    session_actions = session.add_subparsers(dest="session_action", required=True)
+    export = session_actions.add_parser("export", help="save an owner-private portable profile file")
+    export.add_argument("file", help="private output JSON file (never stdout)")
+    export.add_argument("--overwrite", action="store_true", help="replace an existing export file; never the active profile")
+    import_command = session_actions.add_parser("import", help="validate and atomically install a portable profile")
+    import_command.add_argument("file", help="previously exported profile JSON file")
+    import_command.add_argument("--replace", action="store_true", help="explicitly replace an existing local profile after validation")
     configure = commands.add_parser("configure", help="import identifiers or refresh a verified LAN endpoint",
         description="Copy only needed identifiers from existing saved app metadata, or refresh an existing standalone profile's verified LAN endpoint. No login, cloud calls or device changes.")
     config_source = configure.add_mutually_exclusive_group(required=True)
@@ -171,6 +182,17 @@ def _limits() -> dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command == "session":
+        try:
+            if args.session_action == "export":
+                path = session_transfer.export_session(args.file, overwrite=args.overwrite)
+            else:
+                path = session_transfer.import_session(args.file, replace=args.replace)
+            return {"ok": True, "operation": "session_" + args.session_action, "file": str(path),
+                    "contents": "standalone_profile", "network_used": False, "login_performed": False,
+                    "login_tokens_included": False, "encrypted": False}
+        except session_transfer.SessionTransferError as exc:
+            raise CliError("session_transfer_failed", str(exc)) from exc
     discover_for_read = getattr(args, "discover", False)
     if args.command == "status" and discover_for_read and not getattr(args, "live", False):
         raise CliError("invalid_option_combination", "status --discover requires --live")

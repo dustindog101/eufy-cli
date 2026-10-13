@@ -67,6 +67,28 @@ The CLI stores only the HomeBase private IPv4 address, station serial/P2P identi
 
 Normal commands never fall back to the app if config is missing or invalid. Discovery alone cannot currently bootstrap all identifiers needed for control. A configured CLI has no GUI/IPC dependency; physical termination of the app and complete HomeBase WAN isolation have not been validated.
 
+## Portable session export/import
+
+Move the configured local profile between your trusted machines using the same command structure as the Blackboard CLI:
+
+```sh
+eufy session export PRIVATE_PROFILE.json
+# Transfer the file privately, for example over SSH/SFTP.
+eufy session import PRIVATE_PROFILE.json
+```
+
+Windows uses `python bin/eufy session import PRIVATE_PROFILE.json` or `bin\eufy.cmd session import PRIVATE_PROFILE.json` from the source checkout. The export carries the standalone device/account identifiers, alias, recorded role and saved LAN endpoint in a versioned JSON envelope. It includes no app archives, passwords, login cookies/tokens, cloud keys or events. The file is unencrypted and private; never commit or upload it publicly.
+
+Export protects the output file with owner-only permissions and preserves its source. The chosen output directory must already exist; its permissions are left alone. `--overwrite` explicitly replaces an existing export file. Import rejects malformed, oversized, unsupported or extra-credential data before changing the local profile, preserves identifiers/role, and uses an atomic owner-private save. An existing destination requires `--replace`; failed validation or saving preserves it. Imports do not grant permissions.
+
+Both commands run offline and do not access the app, discover devices, change camera settings or refresh metadata. Verify the imported profile separately on the HomeBase LAN:
+
+```sh
+eufy status --live --discover
+```
+
+The receiver needs the source checkout, Python/Node dependencies, and LAN access. Peer ports/IPs can change; `--discover` finds the current identity-matched endpoint for a live read.
+
 ## Commands
 
 ```sh

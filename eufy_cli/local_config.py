@@ -73,6 +73,8 @@ def _validate(data: Any) -> dict[str, Any]:
     if device['station_sn'] != station['device_sn']:
         raise LocalConfigError('Local config device and station do not match')
     _text(station['p2p_did'])
+    if not isinstance(station['ip_addr'], str):
+        raise LocalConfigError('Local config requires a private IPv4 HomeBase address')
     try:
         ip = ipaddress.ip_address(station['ip_addr'])
     except ValueError:
@@ -141,7 +143,7 @@ if ($request.directory) {
         raise LocalConfigError('Could not restrict local config permissions; no identifiers were written') from None
 
 
-def _save(data: dict[str, Any], path: Path) -> Path:
+def _save(data: dict[str, Any], path: Path, *, overwrite: bool = True) -> Path:
     _validate(data)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _private_permissions(path.parent, directory=True)
@@ -154,10 +156,20 @@ def _save(data: dict[str, Any], path: Path) -> Path:
             json.dump(data, stream, allow_nan=False, separators=(',', ':'))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp_path, path)
+        if overwrite:
+            os.replace(temp_path, path)
+        else:
+            # Linking a fully-written same-directory temp file publishes it
+            # atomically only if no destination already exists.
+            os.link(temp_path, path)
     finally:
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                # Once published, cleanup failure must not turn success into an
+                # error that could mislead the caller about the committed file.
+                pass
     return path
 
 
