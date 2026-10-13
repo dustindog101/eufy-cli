@@ -20,3 +20,6 @@ userinfo.archive
 *.pcap
 *.pcapng
 *.skill
+
+# Portable exports carry private device/account identifiers.
+*.eufy-profile.json

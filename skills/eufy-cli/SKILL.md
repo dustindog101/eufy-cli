@@ -52,13 +52,13 @@ For an IP/response-port change, `configure --host` (directed) or `configure --fr
 ## Portable session/profile transfer
 
 ```sh
-eufy session export PRIVATE_PROFILE.json
-eufy session import PRIVATE_PROFILE.json
+eufy session export PRIVATE_PROFILE.eufy-profile.json
+eufy session import PRIVATE_PROFILE.eufy-profile.json
 ```
 
-Use these for an authorized transfer between the user's trusted machines. Transfer the file over a private channel such as SSH/SFTP; never paste or publish its contents. Export is unencrypted and contains private device/account identifiers, not login cookies or tokens. Import validates the versioned file offline and installs it with owner-only permissions. No app access, cloud/login calls or camera changes occur. Verify LAN access separately with `status --live --discover`.
+Use these for an authorized transfer between the user's trusted machines. Transfer the file over a private channel such as SSH/SFTP; never paste or publish its contents. Export is unencrypted and contains private device/account identifiers, not login cookies or tokens. Choose an existing private directory for the export; the CLI restricts the file but does not change that directory's permissions. Import validates the versioned file offline and installs it with owner-only permissions. No app access, cloud/login calls or camera changes occur. Verify LAN access separately with `status --live --discover`.
 
-Preserve existing profiles by default. Use import `--replace` only for an authorized replacement; use export `--overwrite` only when replacing that output is intended. Invalid imports and failed atomic saves preserve the previous profile. Preserve the transferred role/identifiers exactly; importing does not grant Admin access. Transfer to another host still needs authorization. On Windows use the checkout launcher described above.
+Preserve existing profiles by default. Use import `--replace` only for an authorized replacement; use export `--overwrite` only when replacing that output is intended. Invalid imports and failed atomic saves preserve the previous profile. Preserve the transferred role/identifiers exactly; importing does not grant Admin access. Transfer to another host still needs authorization. Mac-to-Windows import/export and fresh Windows status have been live validated. On Windows use the checkout launcher described above.
 
 ## Limits and private diagnostics
 

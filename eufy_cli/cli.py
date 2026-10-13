@@ -31,8 +31,8 @@ def _parser() -> argparse.ArgumentParser:
         epilog="""Examples:
   eufy status --live                         Fresh LAN motion status
   eufy configure --from-app                 One-time private identifier import
-  eufy session export PRIVATE_FILE.json      Export a portable private profile
-  eufy session import PRIVATE_FILE.json      Import without app access or login
+  eufy session export FILE                  Export a portable private profile
+  eufy session import FILE                  Import without app access or login
   eufy refresh                               Reload local identifiers + fresh motion
   eufy motion off --shared-admin --dry-run   Preview only
   eufy motion off --shared-admin             Turn motion off and verify
@@ -111,7 +111,7 @@ def _fail(code: str, message: str, exit_code: int = 2) -> int:
 
 def _cache() -> AppCache:
     if not local_config.is_configured():
-        raise CliError("local_config_missing", "Run eufy configure --from-app once, or restore your private local config; normal commands never read app files")
+        raise CliError("local_config_missing", "Run eufy session import FILE, or configure --from-app once on macOS; normal commands never read app files")
     try:
         return local_config.load()
     except local_config.LocalConfigError as exc:

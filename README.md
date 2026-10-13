@@ -38,7 +38,7 @@ npm.cmd ci --ignore-scripts --no-audit --no-fund
 
 `python bin/eufy COMMAND` also works. Run locally on Windows or through an existing SSH connection; the Windows process sends UDP to the HomeBase, rather than forwarding camera traffic through the SSH client. The Windows host needs a working route to the HomeBase and permission for UDP replies. No firewall changes are made by this CLI.
 
-Windows cannot import the Mac app cache. Transfer your already configured `local.json` privately to `%USERPROFILE%\.config\eufy-cli\local.json` (or the equivalent under `XDG_CONFIG_HOME`). Protect the destination directory with an owner-only Windows ACL **before copying**. Do not place it in the Git checkout. Config writes use a protected ACL granting only the current Windows user access; Unix uses directory700/file600. Windows PowerShell is required for private configuration writes.
+Windows cannot import the Mac app cache. On the configured source machine, run `eufy session export PRIVATE_PROFILE.eufy-profile.json`, transfer the file privately, then run `.\bin\eufy.cmd session import PRIVATE_PROFILE.eufy-profile.json` on Windows. Keep the transfer file outside the checkout in a directory restricted to your Windows user. Import protects the installed profile with an owner-only Windows ACL; Unix uses directory700/file600. Windows PowerShell is required for private configuration writes. See [portable session transfer](#portable-session-exportimport) below.
 
 After transferring a profile, use an identity-matched lookup before each live read:
 
@@ -69,15 +69,15 @@ Normal commands never fall back to the app if config is missing or invalid. Disc
 
 ## Portable session export/import
 
-Move the configured local profile between your trusted machines using the same command structure as the Blackboard CLI:
+Move the configured local profile between your trusted machines:
 
 ```sh
-eufy session export PRIVATE_PROFILE.json
+eufy session export PRIVATE_PROFILE.eufy-profile.json
 # Transfer the file privately, for example over SSH/SFTP.
-eufy session import PRIVATE_PROFILE.json
+eufy session import PRIVATE_PROFILE.eufy-profile.json
 ```
 
-Windows uses `python bin/eufy session import PRIVATE_PROFILE.json` or `bin\eufy.cmd session import PRIVATE_PROFILE.json` from the source checkout. The export carries the standalone device/account identifiers, alias, recorded role and saved LAN endpoint in a versioned JSON envelope. It includes no app archives, passwords, login cookies/tokens, cloud keys or events. The file is unencrypted and private; never commit or upload it publicly.
+Windows uses `python bin/eufy session import PRIVATE_PROFILE.eufy-profile.json` or `bin\eufy.cmd session import PRIVATE_PROFILE.eufy-profile.json` from the source checkout. The export carries the standalone device/account identifiers, alias, recorded role and saved LAN endpoint in a versioned JSON envelope. It includes no app archives, passwords, login cookies/tokens, cloud keys or events. The file is unencrypted and private; never commit or upload it publicly.
 
 Export protects the output file with owner-only permissions and preserves its source. The chosen output directory must already exist; its permissions are left alone. `--overwrite` explicitly replaces an existing export file. Import rejects malformed, oversized, unsupported or extra-credential data before changing the local profile, preserves identifiers/role, and uses an atomic owner-private save. An existing destination requires `--replace`; failed validation or saving preserves it. Imports do not grant permissions.
 
@@ -87,7 +87,7 @@ Both commands run offline and do not access the app, discover devices, change ca
 eufy status --live --discover
 ```
 
-The receiver needs the source checkout, Python/Node dependencies, and LAN access. Peer ports/IPs can change; `--discover` finds the current identity-matched endpoint for a live read.
+Mac export → Windows import/export and fresh LAN status have been verified with a temporary profile; the active Windows profile remained unchanged. The receiver needs the source checkout, Python/Node dependencies, and LAN access. Peer ports/IPs can change; `--discover` finds the current identity-matched endpoint for a live read.
 
 ## Commands
 
@@ -128,6 +128,7 @@ Both options send one bounded LAN lookup and update the endpoint only after a re
 | Motion on/off with readback | Live validated on macOS for that pair; Windows writes not tested |
 | App-file-independent runtime | Live validated with app-cache loading blocked |
 | Local discovery; standalone IP maintenance | Implemented, identity-checked |
+| Offline profile export/import | Mac-to-Windows round-trip and fresh Windows status validated |
 | Event history | Unresolved: local queries can return empty despite app events |
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
