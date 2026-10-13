@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+"""Run the private local Eufy CLI directly from its checkout."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from eufy_cli.cli import main
+raise SystemExit(main())

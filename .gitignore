@@ -1,0 +1,22 @@
+node_modules/
+.env*
+.state/
+private/
+*.log
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Never commit device/account identifiers or app/network evidence.
+local.json
+*_BCDevicesMan
+userinfo.archive
+*.archive
+*.pcap
+*.pcapng
+*.skill

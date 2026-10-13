@@ -1,0 +1,13 @@
+{
+  "scripts": {
+    "test": "node --test tests-node/*.test.mjs"
+  },
+  "dependencies": {
+    "eufy-security-client": "4.0.0"
+  },
+  "private": true,
+  "name": "eufy-cli-runtime",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Pinned local P2P backend for the Eufy CLI"
+}
