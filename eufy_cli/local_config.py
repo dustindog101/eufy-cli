@@ -115,7 +115,11 @@ if ($request.directory) {
 $acl.SetAccessRuleProtection($true, $false)
 $acl.SetOwner($sid)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $request.path -AclObject $acl
+if ($request.directory) {
+    [System.IO.Directory]::SetAccessControl($request.path, $acl)
+} else {
+    [System.IO.File]::SetAccessControl($request.path, $acl)
+}
 """
     try:
         subprocess.run(

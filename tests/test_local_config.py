@@ -41,13 +41,15 @@ class LocalConfigTests(unittest.TestCase):
             return
         script = r"""
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath ([Console]::In.ReadToEnd())
+$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+if ($request.directory) { $acl = [System.IO.Directory]::GetAccessControl($request.path) }
+else { $acl = [System.IO.File]::GetAccessControl($request.path) }
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 $valid = $acl.AreAccessRulesProtected -and ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $sid) -and ($rules.Count -eq 1) -and ($rules[0].IdentityReference.Value -eq $sid) -and ($rules[0].AccessControlType -eq 'Allow') -and (($rules[0].FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl)
 if (-not $valid) { exit 3 }
 """
-        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], input=str(path.resolve()), text=True, capture_output=True, timeout=15)
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], input=json.dumps({'path': str(path.resolve()), 'directory': directory}), text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, 'Windows ACL must grant only the owner full control without inheritance')
 
     def test_failed_permissions_leave_existing_config_and_no_identifiers_in_temp(self):
