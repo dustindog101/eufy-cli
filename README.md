@@ -40,7 +40,7 @@ npm.cmd ci --ignore-scripts --no-audit --no-fund
 
 Windows cannot import the Mac app cache. Transfer your already configured `local.json` privately to `%USERPROFILE%\.config\eufy-cli\local.json` (or the equivalent under `XDG_CONFIG_HOME`). Protect the destination directory with an owner-only Windows ACL **before copying**. Do not place it in the Git checkout. Config writes use a protected ACL granting only the current Windows user access; Unix uses directory700/file600. Windows PowerShell is required for private configuration writes.
 
-The Windows launcher, configuration ACLs, all synthetic tests, and LAN discovery have been checked on a real Windows host. Fresh camera status and motion writes from Windows still require a configured profile and have not yet been live validated there.
+The Windows launcher, configuration ACLs, all synthetic tests, and LAN discovery have been checked on a real Windows host. On one tested Windows LAN host, a configured profile matched the HomeBase in broadcast discovery, but directed UDP and live status timed out; Windows reported the station neighbor as unreachable. Fresh status/control on Windows remain unverified. Check direct LAN reachability before attributing a timeout to login or permissions.
 
 ## One-time setup
 
