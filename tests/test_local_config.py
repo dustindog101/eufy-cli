@@ -22,6 +22,18 @@ class LocalConfigTests(unittest.TestCase):
         (self.root / 'app_BCDevicesMan').write_bytes(device_archive())
         self.device = AppCache.load(self.root).select(None)
         self.path = self.root / 'state' / 'local.json'
+        if os.name == 'nt':
+            real_run = subprocess.run
+            def diagnose_acl(*args, **kwargs):
+                check = kwargs.pop('check', False)
+                kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = real_run(*args, **kwargs)
+                if check:
+                    self.assertEqual(result.returncode, 0, 'Synthetic Windows ACL command failed: ' + str(result.stderr))
+                return result
+            diagnostic = patch('eufy_cli.local_config.subprocess.run', side_effect=diagnose_acl)
+            diagnostic.start()
+            self.addCleanup(diagnostic.stop)
 
     def assert_private_permissions(self, path, *, directory):
         if os.name != 'nt':
