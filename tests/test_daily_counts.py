@@ -85,7 +85,9 @@ class DailyCountTests(unittest.TestCase):
         self.assertEqual(out.getvalue(), self.call()[1])
 
     def test_empty_local_history_is_not_presented_as_authoritative(self):
-        self.backend.return_value = {'ok': True, 'result': {'events': [], 'count': 0, 'source': 'local-p2p'}}
+        self.backend.return_value = {'ok': True, 'result': {
+            'events': [], 'source': 'local-p2p', 'time_basis': 'homebase_wall_clock', 'timezone_verified': False,
+            'pages': 1, 'query_exhausted': True, 'truncated': False, 'partial_reason': None}}
         out = io.StringIO()
         with redirect_stdout(out):
             code = main(['events', '--json'])

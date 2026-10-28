@@ -26,6 +26,20 @@ CONTAINER_KEYS = ("events", "records", "items", "history", "data", "result")
 SAFE_EVENT_TYPE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
 
 
+def parse_calendar_since(value: str | None) -> dt.datetime | None:
+    if value is None:
+        return None
+    try:
+        date = dt.date.fromisoformat(value)
+        if date.isoformat() != value:
+            raise ValueError
+    except ValueError:
+        raise EventError("invalid_since", "Local history selects calendar days; use YYYY-MM-DD.") from None
+    if date > dt.date.today():
+        raise EventError("invalid_since", "The selected day cannot be in the future.")
+    return dt.datetime.combine(date, dt.time.min)
+
+
 def parse_since(value: str | None) -> dt.datetime | None:
     if not value:
         return None
@@ -207,19 +221,18 @@ def read_local_events(
     device: CachedDevice,
     *,
     since: dt.datetime | None = None,
-    limit: int = 20,
+    limit: int = 200,
     counts_only: bool = False,
+    end_date: dt.date | None = None,
 ) -> dict[str, Any]:
-    now = dt.datetime.now(dt.timezone.utc)
-    if counts_only:
-        now = now.astimezone()
-    start = since or (now - dt.timedelta(days=30))
+    now = dt.datetime.now().astimezone()
+    start = since or now
     if (now.date() - start.date()).days > 30:
         raise EventError("date_range_too_large", "local station history is limited to a 30-day date range")
     query = {
         "startDate": start.date().isoformat(),
-        "endDate": now.date().isoformat(),
-        "maxItems": min(limit, 20),
+        "endDate": (end_date or now.date()).isoformat(),
+        "maxItems": min(limit, 20 if counts_only else 200),
     }
     try:
         payload = build_payload(device, "events.counts" if counts_only else "events.local", query=query)
@@ -252,19 +265,38 @@ def read_local_events(
             "start_date": query["startDate"], "end_date": query["endDate"],
             "note": "HomeBase-reported dates and raw numeric values. Numeric values are not verified event totals and may differ from the app. Missing days are unknown, not zero.",
         }
-    events = normalize_records(
-        result,
-        cache.events_aliases(),
-        since=since,
-        limit=limit,
-        fallback_type="recording",
-        fallback_alias=device.alias,
-    )
+    if (not isinstance(result, dict) or result.get("source") != "local-p2p"
+            or result.get("time_basis") != "homebase_wall_clock" or result.get("timezone_verified") is not False
+            or type(result.get("query_exhausted")) is not bool or type(result.get("truncated")) is not bool
+            or type(result.get("pages")) is not int or not 1 <= result["pages"] <= 12
+            or result.get("partial_reason") not in (None, "limit", "timeout", "query_failed", "cursor_stalled", "page_budget")
+            or (not result["truncated"] and not result["query_exhausted"])
+            or (result["truncated"] != (result["partial_reason"] is not None))
+            or not isinstance(result.get("events"), list) or len(result["events"]) > limit):
+        raise EventError("invalid_history_response", "HomeBase recording history was invalid")
+    events = []
+    for row in result["events"]:
+        try:
+            stamp = dt.datetime.fromisoformat(row["timestamp"])
+            end = dt.datetime.fromisoformat(row["end_timestamp"])
+            if (stamp.tzinfo or end.tzinfo or stamp.isoformat() != row["timestamp"]
+                    or end.isoformat() != row["end_timestamp"] or end < stamp or row["type"] != "recording"
+                    or not query["startDate"] <= stamp.date().isoformat() <= query["endDate"]):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise EventError("invalid_history_response", "HomeBase recording timestamps were invalid") from None
+        events.append({"timestamp": row["timestamp"], "end_timestamp": row["end_timestamp"],
+                       "type": "recording", "device_alias": device.alias})
     return {
         "source": "local_station_history",
         "cached": False,
         "authoritative_history": False,
         "complete": False,
         "device_alias": device.alias,
-        "events": events,
+        "events": sorted(events, key=lambda row: row["timestamp"]),
+        "count": len(events), "start_date": query["startDate"], "end_date": query["endDate"],
+        "time_basis": "homebase_wall_clock", "timezone_verified": False,
+        "query_exhausted": result["query_exhausted"], "truncated": result["truncated"],
+        "partial_reason": result["partial_reason"], "pages": result["pages"],
+        "note": "Local recording metadata only. HomeBase clock timezone and agreement with the full app event list are unverified.",
     }

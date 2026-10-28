@@ -13,7 +13,7 @@ from .archive import ArchiveError
 from .backend import BackendError, build_payload, run_backend
 from .cache import AppCache
 from .discovery import DiscoveryError, discover
-from .events import EventError, parse_since, read_cache_events, read_local_events
+from .events import EventError, parse_calendar_since, parse_since, read_cache_events, read_local_events
 from . import local_config, session_transfer
 
 
@@ -43,6 +43,7 @@ def _parser() -> argparse.ArgumentParser:
   eufy status                  Check fresh motion status
   eufy motion off              Turn motion detection off and verify
   eufy motion on               Turn motion detection on and verify
+  eufy events yesterday        List recording times for yesterday
 
 First use: eufy configure --from-app (Mac), or eufy session import FILE.
 If the app shows Admin/Owner: eufy configure --confirm-admin (once).
@@ -98,12 +99,12 @@ If acknowledgement/readback fails, check eufy status before another write.""")
     discovery.add_argument("--host", help="private IPv4 address for directed lookup")
     discovery.add_argument("--timeout", type=float, default=2.0, help="reply window, 0.1–10 seconds (default: 2)")
     commands.add_parser("limits", help="show supported features (offline)")
-    events = commands.add_parser("events", help="reported activity dates or experimental event history",
-        description="Use eufy events days for dates reported by the HomeBase. Its numeric values are not verified event totals. Timestamped history remains unresolved. Missing days and empty history do not prove zero events. Video playback/download is unavailable.")
-    events.add_argument("view", nargs="?", choices=("days", "counts"), help="days: reported HomeBase activity dates, last 7 days; counts is a compatibility alias, not verified totals")
+    events = commands.add_parser("events", help="list recording times for a day",
+        description="List local recording times: eufy events yesterday, eufy events day-before-yesterday, or eufy events YYYY-MM-DD. Defaults to today. Reads up to 200 records with pagination; partial results are marked. Times preserve the HomeBase clock; its timezone and full app-list completeness are unverified. Video playback/download is unavailable.")
+    events.add_argument("view", nargs="?", metavar="DAY", help="today, yesterday, day-before-yesterday, YYYY-MM-DD, or days (activity dates)")
     events.add_argument("--device", help="device alias")
-    events.add_argument("--limit", type=int, default=20, help="maximum events, 1–20")
-    events.add_argument("--since", help="ISO date or timestamp, up to 30 days ago")
+    events.add_argument("--limit", type=int, default=200, help="maximum recordings, 1–200 (default: 200)")
+    events.add_argument("--since", help="first calendar date (YYYY-MM-DD), up to 30 days ago")
     events.add_argument("--source", choices=("local", "cache"), default="local")
     return parser
 
@@ -199,12 +200,12 @@ def _limits() -> dict[str, Any]:
     return {
         "ok": True,
         "verified_pair": {"doorbell": "T8210", "doorbell_firmware": "2.2.4.6", "homebase": "T8010", "homebase_firmware": "3.4.2.6h"},
-        "working": ["saved_metadata", "lan_discovery", "fresh_motion_status", "motion_on_off_with_readback", "homebase_reported_activity_dates"],
-        "unresolved": {"event_history": "Local queries return empty despite app events; completeness unverified", "daily_event_totals": "HomeBase date-query numeric values have not been reconciled with app event totals", "cached_logs": "App notification logs are opaque"},
+        "working": ["saved_metadata", "lan_discovery", "fresh_motion_status", "motion_on_off_with_readback", "homebase_reported_activity_dates", "local_recording_times_with_pagination"],
+        "unresolved": {"event_history": "Recording times available; full app-list completeness and HomeBase timezone unverified", "daily_event_totals": "HomeBase date-query numeric values have not been reconciled with app event totals", "cached_logs": "App notification logs are opaque"},
         "unsupported": ["live_video", "recording_playback", "recording_download", "other_settings", "snooze", "security_modes", "discovery_only_control_bootstrap"],
         "metadata": {"standalone_configured": local_config.is_configured(), "app_cache_read_in_standalone_mode": False, "reloaded_each_command": True, "app_cache_updated_by_cli": False, "refresh_live_fields": ["motion_detection"], "app_must_be_running": False, "saved_app_cache_required": False, "one_time_import_uses_saved_app_metadata": True, "standalone_config_required": True, "cloud_dsk_required": False, "known_metadata_expiry_limit": None, "expiry_note": "No DSK expiry dependency; continued access after permission, identity, firmware or network changes is not guaranteed"},
         "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "endpoint_recovery": "one identity-matched broadcast after a safe connection failure; --discover forces lookup; profile unchanged", "wire_protocol": "proprietary Eufy P2P"},
-        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "connection_attempts_max": 2, "event_items_max": 20, "daily_count_buckets_max": 31, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10], "live_discovery_seconds": 2},
+        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "connection_attempts_max": 2, "event_items_max": 200, "history_pages_max": 12, "daily_count_buckets_max": 31, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10], "live_discovery_seconds": 2},
         "writes": {"requires_admin": True, "unknown_shared_role_requires": "configure --confirm-admin once, or --shared-admin per invocation", "explicit_guest_blocked": True, "reads_original_and_result": True, "leaves_requested_state": True, "no_op_when_already_matching": True, "automatic_restore_for_normal_commands": False},
         "output": {"normal_commands": "human readable", "automation": "--json", "help": "human readable", "success_exit": 0, "errors_exit": 2},
     }
@@ -309,12 +310,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         counts_only = getattr(args, "view", None) in ("days", "counts")
         if counts_only and (args.device or args.source != "local"):
             raise CliError("invalid_option_combination", "Activity dates cover the whole HomeBase; --device and --source cache are unavailable.")
-        if not 1 <= args.limit <= 20:
-            raise CliError("invalid_limit", "--limit must be between 1 and 20")
+        if not 1 <= args.limit <= 200:
+            raise CliError("invalid_limit", "--limit must be between 1 and 200")
+        end_date = None
         try:
-            since = parse_since(args.since)
+            since = parse_calendar_since(args.since) if args.source == "local" else parse_since(args.since)
             if counts_only and since is None:
                 since = dt.datetime.now().astimezone() - dt.timedelta(days=6)
+            if not counts_only and args.source == "local" and (getattr(args, "view", None) or since is None):
+                if since is not None:
+                    raise EventError("invalid_option_combination", "Choose a day or --since, not both.")
+                view = getattr(args, "view", None) or "today"
+                offsets = {"today": 0, "yesterday": 1, "day-before-yesterday": 2}
+                try:
+                    end_date = dt.date.today() - dt.timedelta(days=offsets[view]) if view in offsets else dt.date.fromisoformat(view)
+                except ValueError:
+                    raise EventError("invalid_day", "Use today, yesterday, day-before-yesterday or YYYY-MM-DD.") from None
+                since = parse_calendar_since(end_date.isoformat())
+            elif not counts_only and getattr(args, "view", None):
+                raise EventError("invalid_option_combination", "Day selection requires local history.")
         except EventError as exc:
             raise CliError(exc.code, str(exc)) from exc
         if args.source == "cache":
@@ -324,7 +338,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise CliError(exc.code, str(exc)) from exc
         device = _selected(cache, args.device)
         try:
-            return {"ok": True, **read_local_events(cache, device, since=since, limit=args.limit, counts_only=counts_only)}
+            return {"ok": True, **read_local_events(cache, device, since=since, limit=args.limit, counts_only=counts_only, end_date=end_date)}
         except EventError as exc:
             raise CliError(exc.code, str(exc)) from exc
 

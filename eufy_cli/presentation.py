@@ -39,13 +39,31 @@ def _text(result: dict[str, Any]) -> str:
         return ("Supported: T8210 doorbell + T8010 HomeBase 2.\n"
                 "Fresh motion status; motion on/off with verified readback.\n"
                 "HomeBase-reported activity dates: eufy events days. Event totals unverified.\n"
-                "History unresolved. Video, playback and other settings unavailable.\n"
+                "Recording times: eufy events yesterday (up to 200; partial results marked).\n"
+                "Full app event history/timezone unverified. Video, playback and other settings unavailable.\n"
                 "Local LAN only; no runtime login or cloud access. Use --json for technical limits.")
     if "responders" in result:
         rows = result["responders"]
         matched = sum(row.get("matched_cached_device") is True for row in rows)
         return f"Found {len(rows)} HomeBase endpoint(s); {matched} match your profile."
     if "events" in result:
+        if result.get("source") == "local_station_history":
+            dates = result['start_date'] if result['start_date'] == result['end_date'] else f"{result['start_date']} to {result['end_date']}"
+            lines = [f"{result['count']} recording(s) returned for {dates}:"]
+            for row in result['events']:
+                stamp = row['timestamp']
+                hour = int(stamp[11:13])
+                clock = f"{hour % 12 or 12}:{stamp[14:19]} {'AM' if hour < 12 else 'PM'}"
+                prefix = f"{stamp[:10]} " if result['start_date'] != result['end_date'] else ""
+                lines.append(f"  {prefix}{clock}")
+            if not result['events']:
+                lines.append("  No records returned; this does not prove there were no events.")
+            if result['truncated']:
+                lines.append(f"Partial results ({result['partial_reason']}); additional recordings may exist.")
+            else:
+                lines.append("HomeBase query exhausted; agreement with the full app event list is unverified.")
+            lines.append("HomeBase-reported clock times; timezone unverified. Recording metadata only.")
+            return "\n".join(lines)
         return f"Experimental history: {len(result['events'])} item(s). History is unresolved; empty output does not prove no events. Use --json for records."
     if "counts" in result:
         lines = [f"HomeBase-reported activity dates ({result['start_date']} to {result['end_date']}):"]

@@ -1,6 +1,6 @@
 ---
 name: eufy-cli
-description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read HomeBase-reported activity dates, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
+description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read local recording times and HomeBase-reported activity dates, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
 ---
 
 # Eufy CLI
@@ -49,6 +49,23 @@ Setup imports only the needed identifiers from existing saved Mac app metadata i
 
 Live status and motion commands try the saved endpoint first. On a safe connection failure, they perform one bounded 2-second broadcast, require one endpoint matching the configured station identity, and retry once. They do not rewrite the profile. No or ambiguous identity matches fail closed. The Node backend remains pinned to the exact selected private HomeBase IP; cloud/TCP/HTTP/fetch guards remain active. This discovery identity check is not cryptographic authentication of broadcast replies. To persist an endpoint change, `configure --host` (directed) or `configure --from-discovery` requires a unique matching configured-station reply. For changing response ports, optional `--discover` looks up the current endpoint before status/refresh/motion. Reject it with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
 
+## Recording times
+
+```sh
+eufy events yesterday --json
+eufy events day-before-yesterday --json
+eufy events YYYY-MM-DD --json
+eufy events --since YYYY-MM-DD --json
+```
+
+For requests such as "all event times from the day before yesterday", use `events day-before-yesterday`. A bare `events` selects today. A date selects one day; `--since` selects a range through today and cannot be combined with a day selector. Relative dates use the computer's calendar date. Selection is automatic when unambiguous; `--device ALIAS` selects a configured device. This is read-only and works without Admin write confirmation.
+
+The CLI automatically paginates local recording metadata in pages of 20, up to 200 records/12 pages within the normal operation budget. `--limit N` can lower the bound. It uses the validated local-storage flag and a descending cursor from the following midnight, with a one-second overlap deduplicated by internal record IDs. Do not replace this with the SDK's incorrect default storage/cursor request or substitute identities. Each page requires its own query ACK. Returned records must match the selected device/station and requested date range. Later-page connection/query failure, a bound or stalled cursor is explicitly partial; a first-page failure is an error. Never silently retry writes or change motion while troubleshooting history.
+
+JSON provides `events` containing `timestamp`, `end_timestamp`, `type:recording` and `device_alias`, plus `count`, date bounds, pages, `truncated`, `partial_reason` and `query_exhausted`. Timestamps preserve the HomeBase wall clock with **no UTC/offset suffix**: `time_basis:homebase_wall_clock`, `timezone_verified:false`. Report them as HomeBase-reported times; do not silently interpret them as UTC or claim the user's local timezone. Text output shows chronological AM/PM times with seconds.
+
+`query_exhausted:true` only means the database returned a short/empty page. `complete:false` and `authoritative_history:false` preserve the unverified agreement with the full app event list. Report the number of recordings returned, not a proven count of all motion/other alerts. Keep separate recordings at identical timestamps. If partial, mention the reason and that additional recordings may exist. Empty output does not prove zero events. Single-day and multi-page reads are live validated on macOS for the documented pair; Windows and other firmware/models remain unverified. No video access or app/cloud fallback is implemented.
+
 ## Activity dates and unresolved event totals
 
 ```sh
@@ -60,7 +77,7 @@ This read-only LAN query returns dates reported by the HomeBase. Default range: 
 
 The raw protocol field called `count` has not been reconciled with app events. A returned value of 1 must not be reported as one event; the app may show several on that day. Text output shows dates only. JSON retains `counts` entries with `date` and raw `count` for compatibility, plus `count_meaning:unverified`, `event_totals_available:false`, `scope:homebase` and `complete:false`. Never sum raw values as event totals, invent zeroes for missing dates, or infer per-doorbell completeness. `events counts` remains an alias with these same limits.
 
-Exact timestamped records remain unresolved. Single-day local queries return explicit empty lists across tested storage/video/compression options; alternate date-based queries, including a station-wide device list, have not responded. The separate device counter has no requested date range and cannot establish daily totals. Raising `--limit` does not fix missing retrieval. Event queries use the saved endpoint without automatic recovery; maintain a moved endpoint with identity-matched `configure --from-discovery`. No cloud services, media, app files or device writes are used. Date retrieval is live verified on macOS for the documented pair; Windows remains unverified. Keep activity metadata private unless sharing is authorized.
+Use `events DAY` for timestamped recording metadata and returned-record counts. The separate device counter has no requested date range and cannot establish daily totals. Event queries use the saved endpoint without automatic recovery; maintain a moved endpoint with identity-matched `configure --from-discovery`. No cloud services, media, app files or device writes are used. Date retrieval is live verified on macOS for the documented pair; Windows remains unverified. Keep activity metadata private unless sharing is authorized.
 
 ## Portable session/profile transfer
 
@@ -76,7 +93,7 @@ Preserve existing profiles by default. Use import `--replace` only for an author
 ## Limits and private diagnostics
 
 - Live validated on T8210 + T8010: fresh motion status on macOS and Windows, and motion changes on macOS. Windows motion writes and other models/firmware are unverified.
-- Timestamped/complete event history is unresolved. HomeBase-wide activity dates are available; numeric event totals are unverified. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
+- Local recording timestamps and HomeBase-wide activity dates are available. Full app event coverage and the HomeBase clock timezone remain unverified; activity-date numeric values are not verified event totals. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
 - The Node transport is pinned to one selected private IPv4 HomeBase address; separate bounded discovery can broadcast during setup, explicit lookup, or safe automatic connection recovery. This does not establish that the HomeBase itself never contacts cloud services.
 - Never disclose the config, app archives, tokens/keys, serials, account/P2P identifiers, private addresses, personal paths or event contents in public artifacts. `discover` can display LAN addresses; aliases and setup paths can also be personal. Share only suitably redacted errors/booleans/model/version information.
 - Do not add fresh cloud login, encrypted-video enrollment, resets, deletions or device/account/network changes as incidental troubleshooting. Explain the supported limitation and preserve the user's requested scope.

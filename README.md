@@ -10,7 +10,7 @@ eufy motion on
 
 Commands show short text results. `status` reads fresh motion from the doorbell; a successful change verifies fresh device readback. A single supported doorbell is selected automatically. Use `eufy devices` and `--device ALIAS` when selection is ambiguous.
 
-After one-time setup, commands use a private standalone profile. No runtime login, app-file reads, Eufy cloud API calls, daemon or GUI dependency. This experimental project is unaffiliated with Eufy/Anker. Video, playback and other settings are not implemented; event history remains unresolved.
+After one-time setup, commands use a private standalone profile. No runtime login, app-file reads, Eufy cloud API calls, daemon or GUI dependency. This experimental project is unaffiliated with Eufy/Anker. Local recording times are available with pagination. Complete app event history, video, playback and other settings are not implemented.
 
 ## Install
 
@@ -69,6 +69,9 @@ eufy motion off --dry-run     # Offline permission/target preview
 eufy devices                 # Saved device list
 eufy status --cache-only      # Saved metadata, no fresh device state
 eufy limits                  # Support limits, no network
+eufy events yesterday        # Recording times for yesterday
+eufy events day-before-yesterday
+eufy events YYYY-MM-DD       # Recording times for a specific day
 eufy events days             # HomeBase-reported activity dates, last 7 days
 eufy help motion
 ```
@@ -77,7 +80,28 @@ eufy help motion
 
 Motion changes require a fresh original state, a correlated command acknowledgement and an independent fresh readback. Already-matching state returns without sending a setter. Normal commands leave the requested state; an explicitly requested validation must restore its original state. On acknowledgement/readback/bridge failure, state may be uncertain: check `eufy status` before another write. The CLI never blindly retries a possible write.
 
-### Activity dates and event-history limits
+### Recording times
+
+```sh
+eufy events                         # Today
+eufy events yesterday
+eufy events day-before-yesterday
+eufy events YYYY-MM-DD               # One specific calendar day
+eufy events yesterday --json
+eufy events --since YYYY-MM-DD       # Date range through today
+```
+
+Commands list recording start times in chronological order, including seconds, and the number of records returned. A single configured doorbell is selected automatically. Each result is fresh local recording metadata, not a video download or an inferred motion alert. JSON includes start/end timestamps and the device alias, with no record IDs, media paths or account/device identifiers.
+
+The CLI retrieves pages of 20 automatically, up to 200 records and 12 pages within its normal 13-second operation budget. `--limit N` selects a smaller bound (1–200); if bounded, the newest records are returned. Adjacent pages overlap by one second and are deduplicated using internal record IDs, retaining distinct recordings at identical times. A limit, later-page timeout/rejection or stalled cursor produces explicitly partial results. A first-page failure is an error, not a zero-event result. Invalid records, wrong device/station identities and out-of-range timestamps fail closed.
+
+**Times preserve the HomeBase-reported wall clock; its timezone is unverified.** JSON timestamps intentionally have no UTC/offset suffix, with `time_basis:homebase_wall_clock` and `timezone_verified:false`. Do not convert them as if they were verified UTC timestamps. Day selection also uses these reported calendar dates. Relative days use this computer's calendar date.
+
+`query_exhausted:true` means the local database query reached a short/empty page. It does not establish agreement with every event shown by the app: `complete` and `authoritative_history` remain false. Alerts without recordings, deleted/unavailable recordings and app-only events may differ. Empty output does not prove there were no events. Date selection is limited to the last 30 days. `--source cache` retains the older experimental notification-log reader and cannot be combined with a day selector.
+
+The validated T8210/T8010 path needs `storage_cloud:0` for local records and a descending time cursor beginning at the following midnight. The pinned SDK's defaults sent a different storage value and the beginning of the requested period as the cursor, returning empty lists. The adapter now builds this specific read-only request directly through the SDK's guarded transport, preserves configured identities, and requires the matching query acknowledgement before accepting a page. Read-only live validation retrieved multiple pages for one day and a separate single-page day. Full app-list agreement and other models/firmware remain unverified.
+
+### HomeBase activity dates
 
 ```sh
 eufy events days
@@ -91,7 +115,7 @@ This read-only query shows calendar dates returned by the HomeBase's database. T
 
 `events counts` remains a compatibility alias for `events days`. JSON preserves the raw `counts` date/value entries for existing callers, together with `count_meaning:unverified`, `event_totals_available:false`, `scope:homebase` and `complete:false`. Do not sum those values as event totals.
 
-Timestamped history remains unresolved. Bounded read-only probes have returned explicit empty lists from the local-record query using individual calendar days, both local/all-storage filters, the video filter and both response-compression settings. The alternative date-based query did not respond, including with a station-wide device list and one-day boundaries. A separate device counter responds but has no requested date range; it cannot establish daily or period totals. Increasing `--limit` cannot recover records that the query has not returned. No complete per-doorbell counts or exact event-time log are claimed.
+Use `events DAY` for individual recording times and returned-record counts. The separate activity-date query and its raw numeric values do not establish event totals. A separate device counter also has no requested date range; it cannot establish daily or period totals.
 
 ### LAN connection handling
 
@@ -169,14 +193,14 @@ Mac-to-Windows private import/export and repeated fresh status with explicit dis
 | Local discovery; standalone endpoint maintenance | Implemented, identity-checked |
 | Automatic connection recovery; consumer UX | Synthetic regression coverage; do not infer live recovery from fixtures |
 | Offline profile export/import | Mac-to-Windows round-trip and fresh Windows status validated |
-| Event history | Unresolved: local queries can return empty despite app events |
+| Recording times | Read-only single-day and multi-page retrieval live validated on macOS for the documented pair; full app-list agreement and clock timezone unverified |
 | HomeBase-reported activity dates | Live verified on macOS; numeric values are not verified event totals |
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
 
 Other models/firmware are unverified. The local key derives from station serial and P2P DID, without a login-expiry timer; firmware, identity, permission or network changes can still break access. Compatibility is not guaranteed indefinitely. The CLI's network restrictions do not establish that the HomeBase itself avoids cloud traffic.
 
-Experimental history queries allow at most 20 items and a start date at most 30 days ago. Empty output does not prove no events. Complete pagination and encrypted recording access are unavailable.
+Recording queries allow at most 200 records, 12 pages and a start date at most 30 days ago. Partial results are explicitly marked; empty output does not prove no events. Complete app event coverage and encrypted recording access are unavailable.
 
 ## Agent skill
 

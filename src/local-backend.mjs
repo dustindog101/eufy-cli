@@ -6,11 +6,9 @@ import dgram from 'node:dgram';
 import {
   BatteryDoorbellCamera,
   CommandName,
+  CommandType,
   DatabaseReturnCode,
   DeviceType,
-  FilterDetectType,
-  FilterEventType,
-  FilterStorageType,
   P2PConnectionType,
   PropertyName,
   Station,
@@ -19,7 +17,8 @@ import {
 const OPERATION_BUDGET_MS = 13_000;
 const CLEANUP_BUDGET_MS = 1_500;
 const MAX_STDIN_BYTES = 1_000_000;
-const MAX_HISTORY_ITEMS = 20;
+const MAX_HISTORY_ITEMS = 200;
+const HISTORY_PAGE_SIZE = 20;
 const MAX_DIAGNOSTIC_ITEMS = 32;
 const MAX_DIAGNOSTIC_PACKETS = 256;
 
@@ -143,7 +142,7 @@ export function normalizeInput(input) {
     if (days < 0 || days > 30) fail('INVALID_DATE_RANGE', 'The local event date range must be within 31 calendar days.');
     const requestedItems = input.query.maxItems === undefined ? MAX_HISTORY_ITEMS : input.query.maxItems;
     if (!Number.isInteger(requestedItems) || requestedItems < 1 || requestedItems > MAX_HISTORY_ITEMS) {
-      fail('INVALID_REQUEST', 'maxItems must be between 1 and 20.');
+      fail('INVALID_REQUEST', 'maxItems must be between 1 and 200.');
     }
     query = { startDate, endDate, maxItems: requestedItems };
   }
@@ -615,9 +614,153 @@ export async function setMotionAndVerify(station, deviceRecord, api, value, dead
   return { ...after, previous: before.enabled, changed: true };
 }
 
+function calendarDate(date) {
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function reportedTime(date) {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) {
+    fail('INVALID_LOCAL_RESPONSE', 'A recording timestamp was invalid.');
+  }
+  // The SDK parses firmware wall-clock strings in the process timezone. Undo
+  // that interpretation; do not label the firmware's unverified clock as UTC.
+  return `${calendarDate(date)}${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
+function isoWallTime(compact) {
+  return `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}T${compact.slice(8, 10)}:${compact.slice(10, 12)}:${compact.slice(12, 14)}`;
+}
+
+function secondAfter(compact) {
+  const date = new Date(`${isoWallTime(compact)}Z`);
+  date.setUTCSeconds(date.getUTCSeconds() + 1);
+  return date.toISOString().slice(0, 19).replace(/[-T:]/g, '');
+}
+
+export function requestHistoryPage(station, device, query, cursor, transaction, deadline) {
+  return new Promise((resolve, reject) => {
+    let acknowledged = false;
+    let received = false;
+    let records;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      station.off('command result', onAck);
+      station.off('database query local', onData);
+      if (error) reject(error);
+      else resolve(records);
+    };
+    const onAck = (source, result) => {
+      const command = result?.customData?.command;
+      if (source !== station || command?.name !== CommandName.StationDatabaseQueryLocal || command?.value?.transaction !== transaction) return;
+      if (result.return_code !== 0) return finish(new BackendError('LOCAL_COMMAND_FAILED', 'The HomeBase did not acknowledge the history query.'));
+      acknowledged = true;
+      if (received) finish();
+    };
+    const onData = (source, code, data) => {
+      if (source !== station) return;
+      if (code !== DatabaseReturnCode.SUCCESSFUL || !Array.isArray(data) || data.length > HISTORY_PAGE_SIZE) {
+        return finish(new BackendError('INVALID_LOCAL_RESPONSE', 'The HomeBase returned an invalid history page.'));
+      }
+      received = true;
+      records = data;
+      if (acknowledged) finish();
+    };
+    const timer = setTimeout(() => finish(new BackendError('LOCAL_TIMEOUT', 'Timed out reading event history.')),
+      getRemainingBudget(deadline, 'LOCAL_TIMEOUT', 'Timed out reading event history.'));
+    station.on('command result', onAck);
+    station.on('database query local', onData);
+    const endExclusive = new Date(query.endDate);
+    endExclusive.setDate(endExclusive.getDate() + 1);
+    try {
+      station.p2pSession.sendCommandWithStringPayload({
+        commandType: CommandType.CMD_SET_PAYLOAD,
+        channel: 0,
+        value: JSON.stringify({
+          account_id: station.rawStation.member.admin_user_id,
+          cmd: CommandType.CMD_DATABASE, mChannel: 0, mValue3: 0,
+          payload: {
+            cmd: CommandType.CMD_DATABASE_QUERY_LOCAL,
+            table: 'history_record_info', transaction,
+            payload: {
+              count: HISTORY_PAGE_SIZE, detection_type: 0,
+              device_info: [{ device_sn: device.device_sn }],
+              start_date: calendarDate(query.startDate), end_date: calendarDate(endExclusive),
+              start_time: cursor, event_type: 0, flag: 0, res_unzip: 1,
+              // On the validated firmware storage_cloud is a boolean flag:
+              // local = 0. SDK FilterStorageType.LOCAL incorrectly sends 1.
+              storage_cloud: 0, ai_type: 0,
+            },
+          },
+        }),
+      }, { command: { name: CommandName.StationDatabaseQueryLocal, value: { transaction } } });
+    } catch {
+      finish(new BackendError('LOCAL_QUERY_FAILED', 'Could not request event history.'));
+    }
+  });
+}
+
+export async function getHistory(station, device, query, deadline) {
+  if (!station.hasCommand(CommandName.StationDatabaseQueryLocal)) fail('UNSUPPORTED_OPERATION', 'Local recording history is unavailable.');
+  await waitForStationConnect(station, deadline);
+  const endExclusive = new Date(query.endDate);
+  endExclusive.setDate(endExclusive.getDate() + 1);
+  const lower = `${calendarDate(query.startDate)}000000`;
+  const upper = `${calendarDate(endExclusive)}000000`;
+  let cursor = upper;
+  let pages = 0;
+  let exhausted = false;
+  let reason = 'limit';
+  const seen = new Map();
+  while (seen.size < query.maxItems && pages < 12) {
+    let rows;
+    try {
+      rows = await requestHistoryPage(station, device, query, cursor, `${Date.now()}-${pages}`, deadline);
+    } catch (error) {
+      if (seen.size === 0 || !['LOCAL_TIMEOUT', 'LOCAL_COMMAND_FAILED', 'LOCAL_QUERY_FAILED'].includes(error.code)) throw error;
+      reason = error.code === 'LOCAL_TIMEOUT' ? 'timeout' : 'query_failed';
+      break;
+    }
+    pages += 1;
+    let oldest = cursor;
+    const previousSize = seen.size;
+    for (const record of rows) {
+      if (!isPlainObject(record) || record.device_sn !== device.device_sn || record.station_sn !== device.station_sn ||
+          !Number.isSafeInteger(record.record_id) || record.record_id < 0 || !isPlainObject(record.history)) {
+        fail('INVALID_LOCAL_RESPONSE', 'History did not match the configured doorbell.');
+      }
+      const start = reportedTime(record.history.start_time);
+      const end = reportedTime(record.history.end_time);
+      if (start < lower || start >= upper || start >= cursor || end < start) {
+        fail('INVALID_LOCAL_RESPONSE', 'History timestamps were outside the requested range.');
+      }
+      oldest = start < oldest ? start : oldest;
+      seen.set(record.record_id, { timestamp: isoWallTime(start), end_timestamp: isoWallTime(end), type: 'recording' });
+    }
+    if (rows.length < HISTORY_PAGE_SIZE) { exhausted = true; reason = null; break; }
+    // Overlap one second, deduplicating by internal record ID. This preserves
+    // boundary ties instead of silently skipping recordings at the same second.
+    const next = secondAfter(oldest);
+    if (seen.size === previousSize || next >= cursor) { reason = 'cursor_stalled'; break; }
+    cursor = next;
+    if (pages === 12) reason = 'page_budget';
+  }
+  const all = [...seen.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const limited = all.length > query.maxItems || !exhausted;
+  return {
+    events: all.slice(-query.maxItems), source: 'local-p2p', pages,
+    time_basis: 'homebase_wall_clock', timezone_verified: false,
+    query_exhausted: exhausted, complete: false,
+    truncated: limited, partial_reason: limited ? reason || 'limit' : null,
+  };
+}
+
 export async function getLocalEvents(station, deviceRecord, query, deadline, countsOnly = false) {
-  const commandName = countsOnly ? CommandName.StationDatabaseCountByDate : CommandName.StationDatabaseQueryLocal;
-  const eventName = countsOnly ? 'database count by date' : 'database query local';
+  if (!countsOnly) return getHistory(station, deviceRecord, query, deadline);
+  const commandName = CommandName.StationDatabaseCountByDate;
+  const eventName = 'database count by date';
   if (!station.hasCommand(commandName)) {
     fail('UNSUPPORTED_OPERATION', 'The station does not expose local event history.');
   }
@@ -667,12 +810,7 @@ export async function getLocalEvents(station, deviceRecord, query, deadline, cou
     const maybeFinish = () => {
       if (!commandAcknowledged || !queryReceived) return;
       try {
-        if (countsOnly) {
-          finish(null, { counts: sanitizeDailyCounts(records, query), scope: 'homebase', complete: false, source: 'local-p2p' });
-        } else {
-          const events = sanitizeEventRecords(records, query.maxItems);
-          finish(null, { events, count: events.length, source: 'local-p2p' });
-        }
+        finish(null, { counts: sanitizeDailyCounts(records, query), scope: 'homebase', complete: false, source: 'local-p2p' });
       } catch {
         finish(new BackendError('INVALID_LOCAL_RESPONSE', 'The local event-history response was invalid.'));
       }
@@ -680,16 +818,7 @@ export async function getLocalEvents(station, deviceRecord, query, deadline, cou
     station.on('command result', onCommandResult);
     station.on(eventName, onQueryResult);
     try {
-      if (countsOnly) {
-        station.databaseCountByDate(query.startDate, query.endDate);
-      } else station.databaseQueryLocal(
-        [deviceRecord.device_sn],
-        query.startDate,
-        query.endDate,
-        FilterEventType.ALL,
-        FilterDetectType.NOT_SUPPORT,
-        FilterStorageType.LOCAL,
-      );
+      station.databaseCountByDate(query.startDate, query.endDate);
     } catch {
       finish(new BackendError('LOCAL_QUERY_FAILED', 'Could not request local event history.'));
     }

@@ -10,6 +10,8 @@ import {
   executeRequest,
   errorResponse,
   getLocalEvents,
+  getHistory,
+  requestHistoryPage,
   installEgressGuards,
   isPrivateIPv4,
   makeOfflineApi,
@@ -21,7 +23,7 @@ import {
   setMotionAndVerify,
   udpDestination,
 } from '../src/local-backend.mjs';
-import { CommandName, DeviceType, Station } from 'eufy-security-client';
+import { CommandName, CommandType, DeviceType, Station } from 'eufy-security-client';
 
 function request(overrides = {}) {
   const stationSN = 'station-fixture';
@@ -424,4 +426,146 @@ test('daily counts reject errors and timeouts instead of presenting false zero t
   assert.equal(normalizeInput(countRequest).operation, 'events.counts');
   countRequest.query.startDate = '2025-01-01';
   assert.throws(() => normalizeInput(countRequest), (error) => error.code === 'INVALID_DATE_RANGE');
+});
+
+function historyRecord(id, minute = id) {
+  return {
+    record_id: id, device_sn: 'doorbell-fixture', station_sn: 'station-fixture',
+    history: { start_time: new Date(2026, 9, 10, 6, minute), end_time: new Date(2026, 9, 10, 6, minute, 10), storage_path: '/private/omit' },
+  };
+}
+
+function historyStation(rows, handler) {
+  const station = new EventEmitter();
+  station.rawStation = request().station.raw;
+  station.isConnected = () => true;
+  station.hasCommand = (name) => name === CommandName.StationDatabaseQueryLocal;
+  station.sent = [];
+  station.p2pSession = { sendCommandWithStringPayload(command, customData) {
+    const body = JSON.parse(command.value);
+    station.sent.push(body);
+    assert.equal(command.commandType, CommandType.CMD_SET_PAYLOAD);
+    assert.equal(body.cmd, CommandType.CMD_DATABASE);
+    assert.equal(body.payload.cmd, CommandType.CMD_DATABASE_QUERY_LOCAL);
+    assert.equal(body.account_id, 'fixture-account');
+    assert.deepEqual(body.payload.payload.device_info, [{ device_sn: 'doorbell-fixture' }]);
+    assert.equal(body.payload.payload.storage_cloud, 0);
+    const ack = () => station.emit('command result', station, { return_code: 0, customData });
+    const data = (records) => station.emit('database query local', station, 0, records);
+    queueMicrotask(() => {
+      if (handler) return handler({ station, body, ack, data });
+      const cursor = body.payload.payload.start_time;
+      const compact = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      data(rows.filter((r) => compact(r.history.start_time) < cursor).sort((a, b) => b.history.start_time - a.history.start_time).slice(0, 20));
+      ack();
+    });
+  } };
+  return station;
+}
+const dayQuery = () => ({ startDate: new Date(2026, 9, 10), endDate: new Date(2026, 9, 10), maxItems: 200 });
+
+function assertHistoryListenersCleared(station) {
+  assert.equal(station.listenerCount('command result'), 0);
+  assert.equal(station.listenerCount('database query local'), 0);
+}
+
+test('history retrieves multiple pages with overlap, preserves wall times and strips private metadata', async () => {
+  const station = historyStation(Array.from({ length: 35 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 35);
+  assert.equal(result.events[0].timestamp, '2026-10-10T06:00:00');
+  assert.equal(result.events.at(-1).timestamp, '2026-10-10T06:34:00');
+  assert.equal(result.query_exhausted, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.truncated, false);
+  assert.equal(result.timezone_verified, false);
+  assert.equal(result.pages, 2);
+  assert.equal(station.sent[0].payload.payload.start_time, '20261011000000');
+  assert.equal(station.sent[0].payload.payload.start_date, '20261010');
+  assert.equal(station.sent[0].payload.payload.end_date, '20261011');
+  assert.equal(station.sent[1].payload.payload.start_time, '20261010061501');
+  assert.equal(JSON.stringify(result).includes('fixture'), false);
+  assert.equal(JSON.stringify(result).includes('/private'), false);
+  assertHistoryListenersCleared(station);
+});
+
+test('history requires its own transaction ACK even when data arrives first', async () => {
+  const station = historyStation([], ({ station, ack, data }) => {
+    station.emit('command result', station, { return_code: 0, customData: { command: { name: CommandName.StationDatabaseQueryLocal, value: { transaction: 'other' } } } });
+    data([]);
+    setTimeout(ack, 10);
+  });
+  const result = await requestHistoryPage(station, request().device, dayQuery(), '20261011000000', 'query-fixture', Date.now() + 1000);
+  assert.deepEqual(result, []);
+  assertHistoryListenersCleared(station);
+});
+
+test('history limit returns the newest records and marks omitted records', async () => {
+  const station = historyStation(Array.from({ length: 25 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, { ...dayQuery(), maxItems: 5 }, Date.now() + 1000);
+  assert.equal(result.events.length, 5);
+  assert.equal(result.events[0].timestamp, '2026-10-10T06:20:00');
+  assert.equal(result.truncated, true);
+  assert.equal(result.query_exhausted, false);
+  assert.equal(result.partial_reason, 'limit');
+  assert.equal(station.sent.length, 1);
+});
+
+test('same-second page boundary cannot silently skip additional recordings or loop', async () => {
+  const station = historyStation(Array.from({ length: 21 }, (_, i) => historyRecord(i, 0)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 20);
+  assert.equal(result.truncated, true);
+  assert.equal(result.query_exhausted, false);
+  assert.equal(result.partial_reason, 'cursor_stalled');
+  assert.equal(station.sent.length, 2);
+  assertHistoryListenersCleared(station);
+});
+
+test('history rejects wrong identities, invalid timestamps and out-of-day responses', async () => {
+  for (const row of [
+    { ...historyRecord(1), device_sn: 'other-doorbell' },
+    { ...historyRecord(1), station_sn: 'other-homebase' },
+    { ...historyRecord(1), history: { start_time: new Date('invalid'), end_time: new Date() } },
+    { ...historyRecord(1), history: { start_time: new Date(2026, 9, 9), end_time: new Date(2026, 9, 9) } },
+  ]) {
+    const station = historyStation([], ({ ack, data }) => { ack(); data([row]); });
+    await assert.rejects(getHistory(station, request().device, dayQuery(), Date.now() + 1000), (error) => error.code === 'INVALID_LOCAL_RESPONSE');
+    assertHistoryListenersCleared(station);
+  }
+});
+
+test('history marks later-page timeout as partial, but a first-page timeout is an error', async () => {
+  for (const first of [true, false]) {
+    const station = historyStation([], ({ station, ack, data }) => {
+      if (first || station.sent.length > 1) return;
+      ack(); data(Array.from({ length: 20 }, (_, i) => historyRecord(i)));
+    });
+    const promise = getHistory(station, request().device, dayQuery(), Date.now() + 30);
+    if (first) await assert.rejects(promise, (error) => error.code === 'LOCAL_TIMEOUT');
+    else {
+      const result = await promise;
+      assert.equal(result.events.length, 20);
+      assert.equal(result.truncated, true);
+      assert.equal(result.partial_reason, 'timeout');
+    }
+    assertHistoryListenersCleared(station);
+  }
+});
+
+test('history handles empty results honestly and caps paginated results at 200', async () => {
+  const empty = await getHistory(historyStation([]), request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(empty.query_exhausted, true);
+  assert.equal(empty.complete, false);
+  assert.deepEqual(empty.events, []);
+  const station = historyStation(Array.from({ length: 400 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 200);
+  assert.equal(result.truncated, true);
+  assert.equal(result.partial_reason, 'limit');
+  assert.ok(station.sent.length <= 12);
+  assertHistoryListenersCleared(station);
+  for (const maxItems of [0, 201, true]) {
+    assert.throws(() => normalizeInput({ ...request(), query: { ...request().query, maxItems } }), (error) => error.code === 'INVALID_REQUEST');
+  }
 });
