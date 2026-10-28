@@ -562,7 +562,7 @@ async function getFreshMotion(station, deviceRecord, api, deadline) {
   return resultPromise;
 }
 
-export async function setMotionAndVerify(station, deviceRecord, api, value, deadline) {
+export async function setMotionAndVerify(station, deviceRecord, api, value, deadline, writeState = {}) {
   const before = await getFreshMotion(station, deviceRecord, api, deadline);
   if (before.enabled === value) return { ...before, previous: before.enabled, changed: false };
   const camera = new BatteryDoorbellCamera(api, deviceRecord, {}, { simultaneousDetections: true });
@@ -583,7 +583,11 @@ export async function setMotionAndVerify(station, deviceRecord, api, value, dead
       } else finish();
     };
     station.on('command result', onResult);
-    try { station.setMotionDetection(camera, value); }
+    try {
+      // Mark before invoking the SDK: even a synchronous failure may have sent.
+      writeState.attempted = true;
+      station.setMotionDetection(camera, value);
+    }
     catch { finish(new BackendError('LOCAL_COMMAND_FAILED', 'Could not send the motion setting.')); }
   });
   let after;
@@ -673,13 +677,14 @@ export async function executeRequest(input) {
   const api = makeOfflineApi(diagnostics);
   const egress = installEgressGuards(request.host);
   let station;
+  const writeState = { attempted: false };
   let detachDiagnostics = () => {};
   try {
     station = await createLocalStation(request, api, diagnostics);
     detachDiagnostics = attachDiagnostics(station, diagnostics);
     let result;
     if (request.operation === 'motion.set') {
-      result = await setMotionAndVerify(station, request.device, api, request.value, deadline);
+      result = await setMotionAndVerify(station, request.device, api, request.value, deadline, writeState);
     } else if (request.operation === 'motion.get') {
       result = await getFreshMotion(station, request.device, api, deadline);
     } else {
@@ -694,6 +699,7 @@ export async function executeRequest(input) {
     if (error instanceof BackendError) {
       backendError.localConnected = Boolean(station?.isConnected());
     }
+    backendError.retrySafe = !writeState.attempted;
     backendError.diagnostics = diagnostics.snapshot(station, egress.denied.length);
     throw backendError;
   } finally {
@@ -707,6 +713,7 @@ export function errorResponse(error) {
   const code = error instanceof BackendError ? error.code : 'LOCAL_OPERATION_FAILED';
   const message = error instanceof BackendError ? error.message : 'The local operation failed.';
   const details = {};
+  if (typeof error?.retrySafe === 'boolean') details.retrySafe = error.retrySafe;
   if (typeof error?.localConnected === 'boolean') details.localConnected = error.localConnected;
   if (Number.isInteger(error?.returnCode)) details.returnCode = error.returnCode;
   if (error?.diagnostics && isPlainObject(error.diagnostics)) details.diagnostics = error.diagnostics;

@@ -1,11 +1,10 @@
-"""Command-line interface for local, cache-backed Eufy information."""
+"""Consumer commands for standalone local Eufy motion control."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 from dataclasses import replace
-import json
 import sys
 from typing import Any
 
@@ -24,89 +23,88 @@ class CliError(RuntimeError):
         self.code = code
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="eufy", description="Local Eufy doorbell control using private local metadata. No new login or cloud calls.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Examples:
-  eufy status --live                         Fresh LAN motion status
-  eufy configure --from-app                 One-time private identifier import
-  eufy session export FILE                  Export a portable private profile
-  eufy session import FILE                  Import without app access or login
-  eufy refresh                               Reload local identifiers + fresh motion
-  eufy motion off --shared-admin --dry-run   Preview only
-  eufy motion off --shared-admin             Turn motion off and verify
-  eufy motion on --shared-admin              Turn motion on and verify
-  eufy limits                                Capabilities and limits (JSON)
+class ArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                          help="output JSON for scripts")
 
-Motion changes leave the requested state in place. --shared-admin asserts
-Admin permission shown in the app when the numeric cache role is unknown.
-Event history is experimental: empty output here does not prove no events.
-Configured commands do not read the app. Refresh does not update app files.
-JSON for command results; human-readable help via eufy help COMMAND.""",
+    def error(self, message):
+        # argparse can echo arbitrary argument values. Keep errors private and
+        # useful, including when JSON was requested for an invalid invocation.
+        raise CliError("invalid_arguments", "Command not recognized or incomplete. Run eufy help or eufy help COMMAND.")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = ArgumentParser(
+        prog="eufy", description="Control your Eufy doorbell over your local network.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Everyday use:
+  eufy status                  Check fresh motion status
+  eufy motion off              Turn motion detection off and verify
+  eufy motion on               Turn motion detection on and verify
+
+First use: eufy configure --from-app (Mac), or eufy session import FILE.
+If the app shows Admin/Owner: eufy configure --confirm-admin (once).
+Use --json for scripts. Use eufy help COMMAND for more options.
+Supports T8210 + T8010 motion control; video and other settings unavailable.""",
     )
     parser.add_argument("--version", action="version", version=f"eufy {__version__}")
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    help_command = commands.add_parser("help", help="show help without accessing the app cache")
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
+    help_command = commands.add_parser("help", help="show help")
     help_command.add_argument("topic", nargs="?", choices=("devices", "status", "refresh", "discover", "events", "motion", "limits", "configure", "session"))
-    session = commands.add_parser("session", help="export/import private standalone identifiers; no login or network",
-        description="Move the configured local profile between trusted machines. The JSON file contains private device/account identifiers, not login cookies, passwords or tokens. Transfer it privately. Import validates locally without contacting the camera or app.")
-    session_actions = session.add_subparsers(dest="session_action", required=True)
-    export = session_actions.add_parser("export", help="save an owner-private portable profile file")
-    export.add_argument("file", help="private output JSON file (never stdout)")
-    export.add_argument("--overwrite", action="store_true", help="replace an existing export file; never the active profile")
-    import_command = session_actions.add_parser("import", help="validate and atomically install a portable profile")
-    import_command.add_argument("file", help="previously exported profile JSON file")
-    import_command.add_argument("--replace", action="store_true", help="explicitly replace an existing local profile after validation")
-    configure = commands.add_parser("configure", help="import identifiers or refresh a verified LAN endpoint",
-        description="Copy only needed identifiers from existing saved app metadata, or refresh an existing standalone profile's verified LAN endpoint. No login, cloud calls or device changes.")
-    config_source = configure.add_mutually_exclusive_group(required=True)
-    config_source.add_argument("--from-app", action="store_true", help="explicit one-time import of existing saved app metadata")
-    config_source.add_argument("--host", help="update standalone HomeBase IP and peer port after matching LAN discovery; no app access")
-    config_source.add_argument("--from-discovery", action="store_true", help="refresh the standalone HomeBase endpoint from one unique identity-matched broadcast reply")
-    configure.add_argument("--device", help="cached device alias")
-    configure.add_argument("--replace", action="store_true", help="replace existing config with a fresh one-time import")
-    commands.add_parser("limits", help="show verified features, requirements and limits (no network)")
-    refresh = commands.add_parser("refresh", help="reload local identifiers and read fresh LAN motion",
-        description="Reload the CLI private config, then query fresh motion over LAN. App files are never read by this command. This does not update the app's own cache.",
-        epilog="With standalone config, change IP via eufy configure --host PRIVATE_IP (identity checked over LAN). Reimport identifiers only if needed using configure --from-app --replace. Refresh does not contact Eufy services.")
-    refresh.add_argument("--device", help="cached device alias")
-    refresh.add_argument("--cache-only", action="store_true", help="only reload saved local identifiers; no network, metadata stays stale")
-    refresh.add_argument("--discover", action="store_true", help="discover the current peer endpoint before a live LAN read")
-
-    commands.add_parser("devices", help="list redacted devices from the app cache")
-
-    status = commands.add_parser("status", help="show cached state, or fresh motion with --live", description="Without --live all values come from saved app metadata and are stale. --live queries fresh motion only; other fields remain cached.")
-    status.add_argument("--device", help="cached device alias")
-    status.add_argument("--live", action="store_true", help="read motion state from the local station over LAN")
-    status.add_argument("--discover", action="store_true", help="discover the current peer endpoint before a live LAN read")
-
-    discovery = commands.add_parser("discover", help="send one local UDP discovery lookup")
-    discovery.add_argument("--host", help="private IPv4 address for directed lookup")
-    discovery.add_argument("--timeout", type=float, default=3.0, help="reply window, 0.1–10 seconds (default: 3)")
-
-    events = commands.add_parser("events", help="experimental history query (currently empty despite app events)", description="History is unresolved on this installation. Empty local output must not be interpreted as proof of no events. App logs are currently opaque.", epilog="Limits: 1–20 items, start date up to 30 days ago; ISO date/timestamp. No video playback/download.")
-    events.add_argument("--device", help="cached device alias")
-    events.add_argument("--limit", type=int, default=20, help="maximum events, 1–20")
-    events.add_argument("--since", help="ISO date or timestamp")
-    events.add_argument("--source", choices=("local", "cache"), default="local", help="local station history (default) or app notification logs")
-
-    motion = commands.add_parser("motion", help="change motion detection with fresh readback", description="T8210 + T8010 only. Requires a fresh original state, command acknowledgement, and fresh readback. Actual commands leave the requested state in place.", epilog="Use --shared-admin only when the app reports Admin permission. Explicit Guest roles are blocked. --dry-run uses stale cached state and sends no network request.")
+    commands.add_parser("devices", help="list configured devices (offline)")
+    status = commands.add_parser("status", help="check fresh motion status",
+        description="Read fresh motion status over LAN. Other metadata stays saved. A single configured doorbell is selected automatically.")
+    refresh = commands.add_parser("refresh", help="check fresh status (same as status)")
+    for command in (status, refresh):
+        command.add_argument("--device", help="device alias, when more than one is available")
+        mode = command.add_mutually_exclusive_group()
+        mode.add_argument("--live", action="store_true", default=True, help=argparse.SUPPRESS)
+        mode.add_argument("--cache-only", action="store_true", help="show saved metadata without network access")
+        command.add_argument("--discover", action="store_true", help="look up the identity-matched HomeBase before connecting")
+    motion = commands.add_parser("motion", help="turn motion detection on or off",
+        description="Change motion detection and verify fresh device readback. Leaves the requested state in place; already-matching state sends no setter.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""If the app shows Admin/Owner, confirm once:
+  eufy configure --confirm-admin
+Guest access cannot change settings.
+If acknowledgement/readback fails, check eufy status before another write.""")
     motion.add_argument("action", choices=("on", "off"))
-    motion.add_argument("--device", help="cached device alias")
-    motion.add_argument("--shared-admin", action="store_true", help="assert the app reports Admin permission when the numeric cached role is unknown")
-    motion.add_argument("--dry-run", action="store_true", help="show a preview without contacting the device")
+    motion.add_argument("--device", help="device alias, when selection is ambiguous")
+    motion.add_argument("--dry-run", action="store_true", help="preview permission and target without network access")
+    motion.add_argument("--discover", action="store_true", help="look up the identity-matched HomeBase before connecting")
+    motion.add_argument("--shared-admin", action="store_true", help="assert confirmed Admin access for this invocation only")
+    configure = commands.add_parser("configure", help="one-time setup and permission confirmation",
+        description="Use saved app identifiers on Mac, or maintain an existing private profile. No login, cloud calls or camera setting changes.")
+    source = configure.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-app", action="store_true", help="import existing saved Mac app identifiers once")
+    source.add_argument("--confirm-admin", action="store_true", help="remember that the app shows Admin/Owner for this profile; never overrides Guest")
+    source.add_argument("--clear-admin", action="store_true", help="forget the saved Admin confirmation")
+    source.add_argument("--host", help="save a private HomeBase address after matching its identity")
+    source.add_argument("--from-discovery", action="store_true", help="save one uniquely identity-matched LAN endpoint")
+    configure.add_argument("--device", help="device alias for app import or endpoint lookup")
+    configure.add_argument("--replace", action="store_true", help="replace an existing profile during app import; clears prior confirmation")
+    session = commands.add_parser("session", help="privately export or import a profile",
+        description="Move a private profile between trusted machines without login or network access. The unencrypted file contains device/account identifiers; transfer it privately.")
+    actions = session.add_subparsers(dest="session_action", required=True)
+    export = actions.add_parser("export", help="save a private profile file")
+    export.add_argument("file", help="private output file (never stdout)")
+    export.add_argument("--overwrite", action="store_true", help="replace an existing export file")
+    import_command = actions.add_parser("import", help="install a private profile file")
+    import_command.add_argument("file", help="previously exported profile file")
+    import_command.add_argument("--replace", action="store_true", help="replace an existing local profile")
+    discovery = commands.add_parser("discover", help="look for HomeBases on your LAN")
+    discovery.add_argument("--host", help="private IPv4 address for directed lookup")
+    discovery.add_argument("--timeout", type=float, default=2.0, help="reply window, 0.1–10 seconds (default: 2)")
+    commands.add_parser("limits", help="show supported features (offline)")
+    events = commands.add_parser("events", help="experimental history (unresolved)",
+        description="History is unresolved. Empty output does not prove no events. Video playback/download is unavailable.")
+    events.add_argument("--device", help="device alias")
+    events.add_argument("--limit", type=int, default=20, help="maximum events, 1–20")
+    events.add_argument("--since", help="ISO date or timestamp, up to 30 days ago")
+    events.add_argument("--source", choices=("local", "cache"), default="local")
     return parser
-
-
-def _emit(payload: dict[str, Any], code: int = 0) -> int:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False) + "\n")
-    return code
-
-
-def _fail(code: str, message: str, exit_code: int = 2) -> int:
-    return _emit({"ok": False, "error": {"code": code, "message": message}}, exit_code)
 
 
 def _cache() -> AppCache:
@@ -146,6 +144,36 @@ def _matched_endpoint(probe: dict[str, Any], alias: str, *, host: str | None = N
     return next(iter(endpoints))
 
 
+def _connected_request(cache: AppCache, device: Any, operation: str, *,
+                       force_discovery: bool = False, motion_value: bool | None = None,
+                       admin_asserted: bool = False) -> dict[str, Any]:
+    def lookup():
+        try:
+            probe = discover(timeout=2, cache=cache)
+        except DiscoveryError as exc:
+            raise CliError("discovery_failed", "HomeBase lookup failed. Check your LAN connection and try eufy status.") from exc
+        host, port = _matched_endpoint(probe, device.alias)
+        return replace(device, station={**device.station, "ip_addr": host, "p2p_port": port})
+
+    def request(target):
+        payload = build_payload(target, operation, motion_value=motion_value)
+        if admin_asserted:
+            payload["role"] = "admin"  # Assertion only; imported role/wire identities stay intact.
+        return run_backend(payload)
+
+    target = lookup() if force_discovery else device
+    try:
+        return request(target)
+    except BackendError as exc:
+        # Retry once only for a connection failure. For writes the backend must
+        # explicitly prove the setter was never attempted. A bridge timeout,
+        # ACK failure, rejection or readback failure never triggers a retry.
+        if (force_discovery or exc.code not in {"LOCAL_TIMEOUT", "LOCAL_CONNECT_FAILED"}
+                or (operation == "motion.set" and not exc.retry_safe)):
+            raise
+        return request(lookup())
+
+
 def _motion_value(device: Any) -> bool | None:
     status = device.public().get("status", {})
     motion = status.get("motion_detection", {})
@@ -174,10 +202,10 @@ def _limits() -> dict[str, Any]:
         "unresolved": {"event_history": "Local queries return empty despite app events; completeness unverified", "cached_logs": "App notification logs are opaque"},
         "unsupported": ["live_video", "recording_playback", "recording_download", "other_settings", "snooze", "security_modes", "discovery_only_control_bootstrap"],
         "metadata": {"standalone_configured": local_config.is_configured(), "app_cache_read_in_standalone_mode": False, "reloaded_each_command": True, "app_cache_updated_by_cli": False, "refresh_live_fields": ["motion_detection"], "app_must_be_running": False, "saved_app_cache_required": False, "one_time_import_uses_saved_app_metadata": True, "standalone_config_required": True, "cloud_dsk_required": False, "known_metadata_expiry_limit": None, "expiry_note": "No DSK expiry dependency; continued access after permission, identity, firmware or network changes is not guaranteed"},
-        "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "explicit_live_discovery": "status --live --discover or refresh --discover adds one identity-matched broadcast; profile unchanged", "wire_protocol": "proprietary Eufy P2P"},
-        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "event_items_max": 20, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10], "live_discovery_seconds": 2},
-        "writes": {"requires_admin": True, "unknown_shared_role_requires": "--shared-admin", "explicit_guest_blocked": True, "reads_original_and_result": True, "leaves_requested_state": True, "no_op_when_already_matching": True, "automatic_restore_for_normal_commands": False},
-        "output": {"normal_commands": "JSON", "help": "human readable", "success_exit": 0, "errors_exit": 2},
+        "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "endpoint_recovery": "one identity-matched broadcast after a safe connection failure; --discover forces lookup; profile unchanged", "wire_protocol": "proprietary Eufy P2P"},
+        "budgets": {"operation_seconds": 13, "cleanup_seconds": 1.5, "bridge_timeout_seconds": 20, "connection_attempts_max": 2, "event_items_max": 20, "event_since_days_max": 30, "discovery_timeout_seconds": [0.1, 10], "live_discovery_seconds": 2},
+        "writes": {"requires_admin": True, "unknown_shared_role_requires": "configure --confirm-admin once, or --shared-admin per invocation", "explicit_guest_blocked": True, "reads_original_and_result": True, "leaves_requested_state": True, "no_op_when_already_matching": True, "automatic_restore_for_normal_commands": False},
+        "output": {"normal_commands": "human readable", "automation": "--json", "help": "human readable", "success_exit": 0, "errors_exit": 2},
     }
 
 
@@ -194,12 +222,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         except session_transfer.SessionTransferError as exc:
             raise CliError("session_transfer_failed", str(exc)) from exc
     discover_for_read = getattr(args, "discover", False)
-    if args.command == "status" and discover_for_read and not getattr(args, "live", False):
-        raise CliError("invalid_option_combination", "status --discover requires --live")
+    if args.command == "status" and discover_for_read and getattr(args, "cache_only", False):
+        raise CliError("invalid_option_combination", "--discover cannot be used with --cache-only")
     if args.command == "refresh" and discover_for_read and getattr(args, "cache_only", False):
         raise CliError("invalid_option_combination", "refresh --discover cannot be used with --cache-only")
     if args.command == "configure":
         try:
+            if args.replace and not args.from_app:
+                raise CliError("invalid_option_combination", "--replace is only used with --from-app.")
+            if getattr(args, "confirm_admin", False) or getattr(args, "clear_admin", False):
+                cache = _cache()
+                device = _selected(cache, args.device)
+                confirmed = bool(args.confirm_admin)
+                if confirmed and device.role == "guest":
+                    raise CliError("guest_settings_forbidden", "Guest access cannot change settings. Ask the owner for Admin access.")
+                path = local_config.confirm_admin(confirmed=confirmed)
+                return {"ok": True, "operation": "permission_confirmation", "admin_confirmed": confirmed,
+                        "role": device.role, "network_used": False}
             if args.host is not None:
                 cache = local_config.load()
                 device = _selected(cache, args.device)
@@ -241,22 +280,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device = _selected(cache, args.device)
         public = device.public()
         is_refresh = args.command == "refresh"
-        live = not getattr(args, "cache_only", False) if is_refresh else getattr(args, "live", False)
+        live = not getattr(args, "cache_only", False)
         output = {"ok": True, "device": public}
         if is_refresh:
             output["refresh"] = {"metadata_reloaded": True, "metadata_source": getattr(cache, "metadata_source", "app_cache"), "app_refresh_triggered": False, "app_cache_modified": False, "requested_at": dt.datetime.now(dt.timezone.utc).isoformat(), "metadata_stale": True, "fresh_fields": ["motion_detection"] if live else []}
         if not live:
             return output
         try:
-            live_device = device
-            if discover_for_read:
-                try:
-                    probe = discover(timeout=2, cache=cache)
-                except DiscoveryError as exc:
-                    raise CliError("discovery_failed", str(exc)) from exc
-                endpoint_host, endpoint_port = _matched_endpoint(probe, device.alias)
-                live_device = replace(device, station={**device.station, "ip_addr": endpoint_host, "p2p_port": endpoint_port})
-            response = run_backend(build_payload(live_device, "motion.get"))
+            response = _connected_request(cache, device, "motion.get", force_discovery=discover_for_read)
         except BackendError as exc:
             raise CliError(exc.code, str(exc)) from exc
         result = response.get("result")
@@ -295,14 +326,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device = _selected(cache, args.device)
         target = args.action == "on"
         role = device.role
-        shared_admin = role == "unknown" and getattr(args, "shared_admin", False)
+        shared_admin = role == "unknown" and (device.admin_confirmed or getattr(args, "shared_admin", False))
         if args.dry_run:
             allowed = role == "admin" or shared_admin
             reason = None
             if role == "guest":
-                reason = "cached Guest role cannot change device settings"
+                reason = "Guest access cannot change settings. Ask the owner for Admin access."
             elif role != "admin" and not shared_admin:
-                reason = "cached role is unknown; refusing device settings changes"
+                reason = "Admin permission is unconfirmed. If the Eufy app shows Admin/Owner, run eufy configure --confirm-admin once, then retry."
             return {
                 "ok": True,
                 "dry_run": True,
@@ -317,14 +348,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "reason": reason,
             }
         if role == "guest":
-            raise CliError("guest_settings_forbidden", "cached Guest role cannot change device settings")
+            raise CliError("guest_settings_forbidden", "Guest access cannot change settings. Ask the owner for Admin access.")
         if role != "admin" and not shared_admin:
-            raise CliError("role_unknown", "cached role is unknown; refusing device settings changes")
+            raise CliError("role_unknown", "Admin permission is unconfirmed. If the Eufy app shows Admin/Owner, run eufy configure --confirm-admin once, then retry.")
         try:
-            payload = build_payload(device, "motion.set", motion_value=target)
-            if shared_admin:
-                payload["role"] = "admin"  # User assertion only; cached wire identity stays intact.
-            result = run_backend(payload)["result"]
+            result = _connected_request(cache, device, "motion.set", motion_value=target,
+                                        admin_asserted=shared_admin, force_discovery=discover_for_read)["result"]
+            if (not isinstance(result, dict) or result.get("fresh") is not True
+                    or result.get("source") != "local-p2p" or result.get("enabled") is not target
+                    or type(result.get("previous")) is not bool or type(result.get("changed")) is not bool):
+                raise BackendError("WRITE_READBACK_UNAVAILABLE", "Fresh verification is unavailable; check eufy status before another write.")
             return {"ok": True, "device": device.alias, "motion_detection": result["enabled"], "previous": result["previous"], "changed": result["changed"], "fresh": True, "source": "local_p2p"}
         except BackendError as exc:
             raise CliError(exc.code, str(exc)) from exc
@@ -333,19 +366,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _parser()
-    args = parser.parse_args(argv)
-    if args.command == "help":
-        if args.topic:
-            parser.parse_args([args.topic, "--help"])
-        else:
-            parser.print_help()
-        return 0
+    from .presentation import emit
+    argv = list(sys.argv[1:] if argv is None else argv)
+    json_output = "--json" in argv
     try:
-        return _emit(run(args))
+        parser = _parser()
+        args = parser.parse_args(argv)
+        if args.command is None or args.command == "help":
+            if getattr(args, "topic", None):
+                parser.parse_args([args.topic, "--help"])
+            else:
+                parser.print_help()
+            return 0
+        return emit(run(args), json_output=json_output)
     except CliError as exc:
-        return _fail(exc.code, str(exc))
+        return emit({"ok": False, "error": {"code": exc.code, "message": str(exc)}}, json_output=json_output, code=2)
+    except KeyboardInterrupt:
+        return emit({"ok": False, "error": {"code": "interrupted", "message": "Interrupted. If changing motion, check eufy status before retrying."}}, json_output=json_output, code=130)
     except Exception:
-        # Keep unexpected parser/backend details (which can contain private
-        # values) out of CLI output.
-        return _fail("internal_error", "command could not be completed")
+        return emit({"ok": False, "error": {"code": "internal_error", "message": "Command could not be completed. Check eufy help and your local installation."}}, json_output=json_output, code=2)

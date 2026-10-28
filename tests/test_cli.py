@@ -147,7 +147,7 @@ class CacheTests(unittest.TestCase):
         cache = AppCache(self.path)
         cache.devices = [device]
         args = type("Args", (), {"command": "motion", "action": "off", "device": None, "dry_run": False, "shared_admin": True})()
-        response = {"ok": True, "result": {"enabled": False, "previous": True, "changed": True}}
+        response = {"ok": True, "result": {"enabled": False, "previous": True, "changed": True, "fresh": True, "source": "local-p2p"}}
         with patch("eufy_cli.cli._cache", return_value=cache), patch("eufy_cli.cli.run_backend", return_value=response) as backend:
             result = run(args)
         payload = backend.call_args.args[0]
@@ -213,7 +213,7 @@ class HelpTests(unittest.TestCase):
                 self.assertIn("usage: eufy", output.getvalue())
             output = io.StringIO()
             with redirect_stdout(output):
-                self.assertEqual(main(["limits"]), 0)
+                self.assertEqual(main(["limits", "--json"]), 0)
             limits = json.loads(output.getvalue())
             self.assertFalse(limits["metadata"]["app_cache_updated_by_cli"])
             self.assertFalse(limits["network"]["cloud_calls"])
@@ -266,7 +266,7 @@ class ConfigureEndpointTests(unittest.TestCase):
                 patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
                 patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
                 redirect_stdout(output):
-            code = main(["configure", "--from-discovery"])
+            code = main(["configure", "--from-discovery", "--json"])
         app_loader.assert_not_called()
         self.assertEqual(probe.call_args.kwargs["timeout"], 2)
         self.assertIsNotNone(probe.call_args.kwargs["cache"])
@@ -331,7 +331,7 @@ class ConfigureEndpointTests(unittest.TestCase):
         with patch.object(local_config, "DEFAULT_CONFIG_PATH", self.config_path), \
                 patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
                 patch("eufy_cli.cli.discover") as probe, redirect_stdout(output):
-            code = main(["configure", "--from-discovery"])
+            code = main(["configure", "--from-discovery", "--json"])
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(output.getvalue())["error"]["code"], "local_config_import_failed")
         app_loader.assert_not_called()
@@ -362,7 +362,7 @@ class LiveDiscoveryTests(unittest.TestCase):
                 patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
                 patch("eufy_cli.cli.run_backend", return_value=response) as backend, \
                 redirect_stdout(output):
-            code = main(argv)
+            code = main(["--json", *argv])
         app_loader.assert_not_called()
         return code, json.loads(output.getvalue()), probe, backend
 
@@ -409,7 +409,7 @@ class LiveDiscoveryTests(unittest.TestCase):
                         patch.object(AppCache, "load", side_effect=AssertionError("No app fallback")) as app_loader, \
                         patch("eufy_cli.cli.discover", return_value={"responders": responders}) as probe, \
                         patch("eufy_cli.cli.run_backend") as backend, redirect_stdout(output):
-                    code = main(["status", "--live", "--discover"])
+                    code = main(["status", "--live", "--discover", "--json"])
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(output.getvalue())["error"]["code"], expected_code)
                 app_loader.assert_not_called()
@@ -418,13 +418,13 @@ class LiveDiscoveryTests(unittest.TestCase):
                 self.assertEqual(self.config_path.read_bytes(), before)
 
     def test_invalid_discover_option_combinations_fail_before_io(self) -> None:
-        for argv in (["status", "--discover"], ["refresh", "--cache-only", "--discover"]):
+        for argv in (["status", "--cache-only", "--discover"], ["refresh", "--cache-only", "--discover"]):
             with self.subTest(argv=argv):
                 output = io.StringIO()
                 with patch.object(local_config, "load") as load_config, \
                         patch("eufy_cli.cli.discover") as probe, \
                         patch("eufy_cli.cli.run_backend") as backend, redirect_stdout(output):
-                    code = main(argv)
+                    code = main(["--json", *argv])
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(output.getvalue())["error"]["code"], "invalid_option_combination")
                 load_config.assert_not_called()

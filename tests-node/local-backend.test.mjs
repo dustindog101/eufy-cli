@@ -8,6 +8,7 @@ import {
   createDiagnostics,
   disposeStation,
   executeRequest,
+  errorResponse,
   installEgressGuards,
   isPrivateIPv4,
   makeOfflineApi,
@@ -15,6 +16,7 @@ import {
   primePeerOnListen,
   normalizeStationDeviceType,
   sanitizeEventRecords,
+  setMotionAndVerify,
   udpDestination,
 } from '../src/local-backend.mjs';
 import { CommandName, DeviceType, Station } from 'eufy-security-client';
@@ -312,4 +314,57 @@ test('peer flow is primed once on the SDK socket before lookup and keeps the pin
     guard.restore();
     dgram.Socket.prototype.send = originalSend;
   }
+});
+
+test('write attempt tracking distinguishes original-read failure from a possible setter send', async () => {
+  const device = request().device;
+  const station = new EventEmitter();
+  station.isConnected = () => true;
+  const state = { attempted: false };
+  station.getCameraInfo = () => {};
+  station.setMotionDetection = () => { throw new Error('possible send before SDK failure'); };
+  await assert.rejects(
+    setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 20, state),
+    (error) => error.code === 'PROPERTY_UNAVAILABLE',
+  );
+  assert.equal(state.attempted, false);
+  station.getCameraInfo = () => queueMicrotask(() => station.emit('raw device property changed', device.device_sn, { 1011: { value: '1', source: 'p2p' } }));
+  await assert.rejects(
+    setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 1000, state),
+    (error) => error.code === 'LOCAL_COMMAND_FAILED',
+  );
+  assert.equal(state.attempted, true);
+  assert.equal(station.listenerCount('command result'), 0);
+});
+
+test('readback mismatch and missing ACK retain write-attempt state and clear listeners', async () => {
+  const device = request().device;
+  for (const ack of [true, false]) {
+    const station = new EventEmitter();
+    station.isConnected = () => true;
+    station.getCameraInfo = () => queueMicrotask(() => station.emit('raw device property changed', device.device_sn, { 1011: { value: '1', source: 'p2p' } }));
+    let writes = 0;
+    station.setMotionDetection = () => {
+      writes += 1;
+      if (ack) queueMicrotask(() => station.emit('command result', station, { channel: 0, return_code: 0, customData: { property: { name: 'motionDetection' } } }));
+    };
+    const state = { attempted: false };
+    await assert.rejects(
+      setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 50, state),
+      (error) => error.code === (ack ? 'WRITE_READBACK_MISMATCH' : 'WRITE_ACK_TIMEOUT'),
+    );
+    assert.equal(state.attempted, true);
+    assert.equal(writes, 1);
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('raw device property changed'), 0);
+  }
+});
+
+test('bridge error carries explicit safe-retry proof only when provided by the operation', () => {
+  const error = new BackendError('LOCAL_TIMEOUT', 'connection timed out');
+  assert.equal(errorResponse(error).error.details?.retrySafe, undefined);
+  error.retrySafe = false;
+  assert.equal(errorResponse(error).error.details.retrySafe, false);
+  error.retrySafe = true;
+  assert.equal(errorResponse(error).error.details.retrySafe, true);
 });

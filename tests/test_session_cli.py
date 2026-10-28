@@ -28,7 +28,7 @@ class SessionCliTests(unittest.TestCase):
             stack.enter_context(patch('eufy_cli.cli.discover', side_effect=AssertionError('No discovery')))
             stack.enter_context(patch('eufy_cli.cli.run_backend', side_effect=AssertionError('No device access')))
             stack.enter_context(redirect_stdout(output))
-            code = main(argv)
+            code = main(["--json", *argv])
         return code, output.getvalue()
 
     def test_cli_roundtrip_is_offline_and_output_contains_no_profile_values(self):

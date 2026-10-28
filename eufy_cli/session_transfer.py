@@ -63,7 +63,8 @@ def _read_bytes(path: Path) -> bytes:
 
 
 def _validated_profile(value: Any) -> dict[str, Any]:
-    if (not isinstance(value, dict) or set(value) != {'version', 'alias', 'role', 'station', 'device'}
+    required = {'version', 'alias', 'role', 'station', 'device'}
+    if (not isinstance(value, dict) or set(value) not in (required, required | {'permissions'})
             or type(value.get('version')) is not int or value['version'] != VERSION):
         raise SessionTransferError('Profile schema is unsupported or invalid.')
     try:

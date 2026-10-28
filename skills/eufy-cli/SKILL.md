@@ -11,27 +11,27 @@ Use installed `eufy` for the user's requested supported action. It sends local P
 
 - Check `command -v eufy`, then `eufy --version`, `eufy limits` and, when relevant, `eufy help COMMAND`.
 - If missing, use the user's checkout or the installation instructions in the repository README: https://github.com/dustindog101/eufy-cli. Python3.11+, Node22+ and npm are required; keep launcher and backend together in the source checkout.
-- On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs, LAN discovery, and repeated fresh motion reads have been validated on Windows. Windows motion writes have not been live tested. For Windows live reads, use `status --live --discover` or `refresh --discover`. This performs one explicit identity-matched broadcast and uses the current response port only in memory, without rewriting the profile. The port can change between sessions; a saved port alone may not suffice. The backend stays pinned to the selected HomeBase IP. Do not infer account expiry or change firewall/routes incidentally. Use `session export FILE` and `session import FILE` to transfer a previously configured profile privately; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
+- On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs, LAN discovery, and repeated fresh motion reads have been validated on Windows. Windows motion writes have not been live tested. Use plain `status` for fresh motion; normal connection failures automatically trigger one identity-matched lookup and safe retry. `status --discover` or `refresh --discover` can look up the current endpoint first when ports change often. Discovered endpoints are used only in memory. Automatic recovery has synthetic regression coverage, not live Windows validation. The backend stays pinned to the selected HomeBase IP. Do not infer account expiry or change firewall/routes incidentally. Use `session export FILE` and `session import FILE` to transfer a previously configured profile privately; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
 - `eufy devices` shows aliases and models. Use `--device ALIAS` when the user names a device or selection is ambiguous.
-- Normal results are JSON. Runtime errors exit2 with `ok:false`. Do not interpret an error or unavailable value as a device state.
+- Normal results are concise text; human errors go to stderr and exit 2. **Use `--json` for structured agent/script results**, including runtime errors with `ok:false`. The flag works before or after the command. Bare `eufy` shows offline help. Do not interpret errors or unavailable values as device states.
 
 ## Status and requested motion changes
 
 ```sh
-eufy status --live
-eufy refresh
-eufy motion off --dry-run
-eufy motion off
-eufy motion on
+eufy status --json
+eufy refresh --json
+eufy motion off --dry-run --json
+eufy motion off --json
+eufy motion on --json
 ```
 
-`device.live_motion.value` is the fresh boolean for status/refresh. Default `status` and dry-run have only saved metadata and can show no motion value. Do not report cached or unavailable state as fresh.
+`device.live_motion.value` is the fresh boolean in JSON status/refresh. Plain `status` is live by default; legacy `--live` is still accepted. Use `status --cache-only` or `refresh --cache-only` for offline saved metadata. Dry-run is offline and shows permission/target, not fresh motion. Do not report cached or unavailable state as fresh.
 
 For a motion change, use the requested on/off state. The backend reads the original, correlates the setter acknowledgement, and performs independent fresh readback. Success returns `motion_detection`, `previous`, `changed` and `fresh`; already-matching settings are a no-op. Normal commands leave the requested state in place.
 
-If role is Admin, no role assertion flag is needed. If its numeric saved role is unknown, use `--shared-admin` only when the user or trusted current/prior GUI evidence confirms Admin permission. Keep that confirmed context; do not demand the same confirmation again without a reason. If unconfirmed, ask whether the app says Admin permission before a write; reads can continue. Explicit Guest roles remain blocked. Never edit a role or substitute identifiers to bypass a refusal.
+If role is Admin or the profile has a saved Admin confirmation, no assertion flag is needed. If the numeric saved role is unknown, ask for the specific permission label shown for this shared doorbell; being invited alone is insufficient. When the user or trusted GUI evidence confirms Admin/Owner, use `eufy configure --confirm-admin` once to persist that fact for the current profile. It preserves the imported role and device/account identities and never overrides explicit Guest. `configure --clear-admin` forgets it; app reimport also clears it. The older `--shared-admin` is a one-invocation assertion, only for confirmed Admin access. Keep confirmed context without asking repeatedly; reads and independent implementation can continue while a permission fact is missing. Never invent numeric role mappings, edit an imported role or substitute identities.
 
-If the user requests a validation toggle, observe the original fresh state and restore it in a finally/recovery path, with fresh readback. Do not toggle merely to answer a status question. For acknowledgement/readback errors, report uncertainty and query `status --live`; do not blindly repeat writes.
+If the user requests a validation toggle, observe the original fresh state and restore it in a finally/recovery path, with fresh readback. Do not toggle merely to answer a status question. For acknowledgement/readback/bridge errors, report uncertainty and query `status --json`; do not blindly repeat writes. Automatic recovery retries only connection failures and, for writes, requires explicit backend proof that no setter was attempted. It never retries an uncertain write, rejection, acknowledgement failure or readback failure.
 
 “Turn off the doorbell” is ambiguous: clarify whether they mean motion detection or something else. Camera power, chime, recording and security-mode controls are outside this CLI's implemented scope.
 
@@ -47,7 +47,7 @@ eufy refresh --cache-only
 
 Setup imports only the needed identifiers from existing saved Mac app metadata into an owner-private config outside the checkout. It does not log in. Do this for an authorized setup request; preserve an existing config unless replacement is requested. `--replace` explicitly reimports identifiers. Normal commands never fall back to the app if config is missing or invalid.
 
-For an IP/response-port change, `configure --host` (directed) or `configure --from-discovery` (one broadcast) requires a unique matching configured-station reply before updating the local endpoint. The latter also saves the UDP response port used to establish the outbound reply flow. It can change between connections; use the explicit `--discover` flag for each Windows live read. Reject `--discover` with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
+Normal commands try the saved endpoint first. On a safe connection failure, they perform one bounded 2-second broadcast, require one endpoint matching the configured station identity, and retry once. They do not rewrite the profile. No or ambiguous identity matches fail closed. The Node backend remains pinned to the exact selected private HomeBase IP; cloud/TCP/HTTP/fetch guards remain active. This discovery identity check is not cryptographic authentication of broadcast replies. To persist an endpoint change, `configure --host` (directed) or `configure --from-discovery` requires a unique matching configured-station reply. For changing response ports, optional `--discover` looks up the current endpoint before status/refresh/motion. Reject it with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
 
 ## Portable session/profile transfer
 
@@ -56,14 +56,14 @@ eufy session export PRIVATE_PROFILE.eufy-profile.json
 eufy session import PRIVATE_PROFILE.eufy-profile.json
 ```
 
-Use these for an authorized transfer between the user's trusted machines. Transfer the file over a private channel such as SSH/SFTP; never paste or publish its contents. Export is unencrypted and contains private device/account identifiers, not login cookies or tokens. Choose an existing private directory for the export; the CLI restricts the file but does not change that directory's permissions. Import validates the versioned file offline and installs it with owner-only permissions. No app access, cloud/login calls or camera changes occur. Verify LAN access separately with `status --live --discover`.
+Use these for an authorized transfer between the user's trusted machines. Transfer the file over a private channel such as SSH/SFTP; never paste or publish its contents. Export is unencrypted and contains private device/account identifiers, not login cookies or tokens. Choose an existing private directory for the export; the CLI restricts the file but does not change that directory's permissions. Import validates the versioned file offline and installs it with owner-only permissions. No app access, cloud/login calls or camera changes occur. Verify LAN access separately with `status --json`. Use `--discover` if you want identity-matched lookup first.
 
-Preserve existing profiles by default. Use import `--replace` only for an authorized replacement; use export `--overwrite` only when replacing that output is intended. Invalid imports and failed atomic saves preserve the previous profile. Preserve the transferred role/identifiers exactly; importing does not grant Admin access. Transfer to another host still needs authorization. Mac-to-Windows import/export and fresh Windows status have been live validated. On Windows use the checkout launcher described above.
+Preserve existing profiles by default. Use import `--replace` only for an authorized replacement; use export `--overwrite` only when replacing that output is intended. Invalid imports and failed atomic saves preserve the previous profile. Preserve transferred role/identifiers and optional permission confirmation exactly; importing does not grant Admin access. Older releases cannot import the new confirmation field. Transfer to another host still needs authorization. Mac-to-Windows import/export and fresh Windows status have been live validated. On Windows use the checkout launcher described above.
 
 ## Limits and private diagnostics
 
 - Live validated on T8210 + T8010: fresh motion status on macOS and Windows, and motion changes on macOS. Windows motion writes and other models/firmware are unverified.
 - Event history is unresolved. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
-- CLI traffic is pinned to one private IPv4 HomeBase address. This does not establish that the HomeBase itself never contacts cloud services.
+- The Node transport is pinned to one selected private IPv4 HomeBase address; separate bounded discovery can broadcast during setup, explicit lookup, or safe automatic connection recovery. This does not establish that the HomeBase itself never contacts cloud services.
 - Never disclose the config, app archives, tokens/keys, serials, account/P2P identifiers, private addresses, personal paths or event contents in public artifacts. `discover` can display LAN addresses; aliases and setup paths can also be personal. Share only suitably redacted errors/booleans/model/version information.
 - Do not add fresh cloud login, encrypted-video enrollment, resets, deletions or device/account/network changes as incidental troubleshooting. Explain the supported limitation and preserve the user's requested scope.
