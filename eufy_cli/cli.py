@@ -98,9 +98,9 @@ If acknowledgement/readback fails, check eufy status before another write.""")
     discovery.add_argument("--host", help="private IPv4 address for directed lookup")
     discovery.add_argument("--timeout", type=float, default=2.0, help="reply window, 0.1–10 seconds (default: 2)")
     commands.add_parser("limits", help="show supported features (offline)")
-    events = commands.add_parser("events", help="reported daily counts or experimental event history",
-        description="Use eufy events counts for HomeBase-wide reported daily counts. Timestamped history remains unresolved. Missing days and empty history do not prove zero events. Video playback/download is unavailable.")
-    events.add_argument("view", nargs="?", choices=("counts",), help="counts: reported HomeBase-wide daily records (default range: 7 days)")
+    events = commands.add_parser("events", help="reported activity dates or experimental event history",
+        description="Use eufy events days for dates reported by the HomeBase. Its numeric values are not verified event totals. Timestamped history remains unresolved. Missing days and empty history do not prove zero events. Video playback/download is unavailable.")
+    events.add_argument("view", nargs="?", choices=("days", "counts"), help="days: reported HomeBase activity dates, last 7 days; counts is a compatibility alias, not verified totals")
     events.add_argument("--device", help="device alias")
     events.add_argument("--limit", type=int, default=20, help="maximum events, 1–20")
     events.add_argument("--since", help="ISO date or timestamp, up to 30 days ago")
@@ -199,8 +199,8 @@ def _limits() -> dict[str, Any]:
     return {
         "ok": True,
         "verified_pair": {"doorbell": "T8210", "doorbell_firmware": "2.2.4.6", "homebase": "T8010", "homebase_firmware": "3.4.2.6h"},
-        "working": ["saved_metadata", "lan_discovery", "fresh_motion_status", "motion_on_off_with_readback", "homebase_reported_daily_record_counts"],
-        "unresolved": {"event_history": "Local queries return empty despite app events; completeness unverified", "cached_logs": "App notification logs are opaque"},
+        "working": ["saved_metadata", "lan_discovery", "fresh_motion_status", "motion_on_off_with_readback", "homebase_reported_activity_dates"],
+        "unresolved": {"event_history": "Local queries return empty despite app events; completeness unverified", "daily_event_totals": "HomeBase date-query numeric values have not been reconciled with app event totals", "cached_logs": "App notification logs are opaque"},
         "unsupported": ["live_video", "recording_playback", "recording_download", "other_settings", "snooze", "security_modes", "discovery_only_control_bootstrap"],
         "metadata": {"standalone_configured": local_config.is_configured(), "app_cache_read_in_standalone_mode": False, "reloaded_each_command": True, "app_cache_updated_by_cli": False, "refresh_live_fields": ["motion_detection"], "app_must_be_running": False, "saved_app_cache_required": False, "one_time_import_uses_saved_app_metadata": True, "standalone_config_required": True, "cloud_dsk_required": False, "known_metadata_expiry_limit": None, "expiry_note": "No DSK expiry dependency; continued access after permission, identity, firmware or network changes is not guaranteed"},
         "network": {"cloud_calls": False, "fresh_login": False, "transport": "UDP to exact cached RFC1918 HomeBase IP", "same_homebase_lan_required": True, "endpoint_recovery": "one identity-matched broadcast after a safe connection failure; --discover forces lookup; profile unchanged", "wire_protocol": "proprietary Eufy P2P"},
@@ -306,9 +306,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return output
 
     if args.command == "events":
-        counts_only = getattr(args, "view", None) == "counts"
+        counts_only = getattr(args, "view", None) in ("days", "counts")
         if counts_only and (args.device or args.source != "local"):
-            raise CliError("invalid_option_combination", "Daily counts cover the whole HomeBase; --device and --source cache are unavailable.")
+            raise CliError("invalid_option_combination", "Activity dates cover the whole HomeBase; --device and --source cache are unavailable.")
         if not 1 <= args.limit <= 20:
             raise CliError("invalid_limit", "--limit must be between 1 and 20")
         try:

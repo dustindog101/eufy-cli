@@ -69,7 +69,7 @@ eufy motion off --dry-run     # Offline permission/target preview
 eufy devices                 # Saved device list
 eufy status --cache-only      # Saved metadata, no fresh device state
 eufy limits                  # Support limits, no network
-eufy events counts           # HomeBase-reported daily counts, last 7 days
+eufy events days             # HomeBase-reported activity dates, last 7 days
 eufy help motion
 ```
 
@@ -77,17 +77,21 @@ eufy help motion
 
 Motion changes require a fresh original state, a correlated command acknowledgement and an independent fresh readback. Already-matching state returns without sending a setter. Normal commands leave the requested state; an explicitly requested validation must restore its original state. On acknowledgement/readback/bridge failure, state may be uncertain: check `eufy status` before another write. The CLI never blindly retries a possible write.
 
-### Daily record counts
+### Activity dates and event-history limits
 
 ```sh
-eufy events counts
-eufy events counts --since YYYY-MM-DD
-eufy events counts --json
+eufy events days
+eufy events days --since YYYY-MM-DD
+eufy events days --json
 ```
 
-These commands read the HomeBase's daily record-count query over LAN, without changing settings. The default range is seven calendar days; an explicit start date can be at most 30 days ago. The response contains at most 31 daily buckets. Counts are **HomeBase-wide**, not filtered to the selected doorbell, so `--device` and `--source cache` are refused. Dates are the HomeBase's reported calendar dates; its timezone has not been independently verified. Count output contains only dates and reported counts.
+This read-only query shows calendar dates returned by the HomeBase's database. The default range is seven calendar days; an explicit start date can be at most 30 days ago, with at most 31 date buckets. Results are HomeBase-wide, so `--device` and `--source cache` are refused. Dates preserve the HomeBase's reported calendar dates; its timezone has not been independently verified.
 
-Daily count retrieval has been live verified on the documented pair on macOS. These are reported recording/database counts, not a verified complete count of motion detections or notifications. Missing days remain unknown; the CLI does not fill them with zero. Timestamped event history remains unresolved: the local-record query can return empty even when the separate count query reports records, and the tested date-based record query did not respond. No exact event-time log or complete per-doorbell totals are claimed.
+**These are not verified daily event totals.** The protocol names a numeric field `count`, but its meaning on the tested firmware has not been reconciled with the events visible in the app. It can report `1` on a date containing multiple app events. Text output therefore shows the dates only. Missing dates are unknown, not zero events.
+
+`events counts` remains a compatibility alias for `events days`. JSON preserves the raw `counts` date/value entries for existing callers, together with `count_meaning:unverified`, `event_totals_available:false`, `scope:homebase` and `complete:false`. Do not sum those values as event totals.
+
+Timestamped history remains unresolved. Bounded read-only probes have returned explicit empty lists from the local-record query using individual calendar days, both local/all-storage filters, the video filter and both response-compression settings. The alternative date-based query did not respond, including with a station-wide device list and one-day boundaries. A separate device counter responds but has no requested date range; it cannot establish daily or period totals. Increasing `--limit` cannot recover records that the query has not returned. No complete per-doorbell counts or exact event-time log are claimed.
 
 ### LAN connection handling
 
@@ -166,7 +170,7 @@ Mac-to-Windows private import/export and repeated fresh status with explicit dis
 | Automatic connection recovery; consumer UX | Synthetic regression coverage; do not infer live recovery from fixtures |
 | Offline profile export/import | Mac-to-Windows round-trip and fresh Windows status validated |
 | Event history | Unresolved: local queries can return empty despite app events |
-| HomeBase-reported daily record counts | Live verified on macOS; HomeBase-wide, completeness/per-doorbell attribution unverified |
+| HomeBase-reported activity dates | Live verified on macOS; numeric values are not verified event totals |
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
 

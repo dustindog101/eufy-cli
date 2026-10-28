@@ -38,7 +38,7 @@ def _text(result: dict[str, Any]) -> str:
     if "verified_pair" in result:
         return ("Supported: T8210 doorbell + T8010 HomeBase 2.\n"
                 "Fresh motion status; motion on/off with verified readback.\n"
-                "HomeBase-reported daily record counts: eufy events counts.\n"
+                "HomeBase-reported activity dates: eufy events days. Event totals unverified.\n"
                 "History unresolved. Video, playback and other settings unavailable.\n"
                 "Local LAN only; no runtime login or cloud access. Use --json for technical limits.")
     if "responders" in result:
@@ -48,11 +48,12 @@ def _text(result: dict[str, Any]) -> str:
     if "events" in result:
         return f"Experimental history: {len(result['events'])} item(s). History is unresolved; empty output does not prove no events. Use --json for records."
     if "counts" in result:
-        lines = [f"HomeBase-reported daily records ({result['start_date']} to {result['end_date']}):"]
-        lines.extend(f"  {row['date']}: {row['count']}" for row in result["counts"])
+        lines = [f"HomeBase-reported activity dates ({result['start_date']} to {result['end_date']}):"]
+        lines.extend(f"  {row['date']}" for row in result["counts"])
         if not result["counts"]:
-            lines.append("  No daily counts returned.")
-        lines.append("HomeBase-wide counts; complete doorbell history is unverified. Missing days are unknown, not zero.")
+            lines.append("  No activity dates returned.")
+        lines.append("Event totals unavailable: the HomeBase's numeric values do not establish how many events occurred.")
+        lines.append("HomeBase-wide dates; complete doorbell history is unverified. Missing days are unknown, not zero.")
         return "\n".join(lines)
     return "Done."
 

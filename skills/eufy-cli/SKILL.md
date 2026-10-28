@@ -1,6 +1,6 @@
 ---
 name: eufy-cli
-description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read HomeBase-reported daily record counts, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
+description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read HomeBase-reported activity dates, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
 ---
 
 # Eufy CLI
@@ -49,16 +49,18 @@ Setup imports only the needed identifiers from existing saved Mac app metadata i
 
 Live status and motion commands try the saved endpoint first. On a safe connection failure, they perform one bounded 2-second broadcast, require one endpoint matching the configured station identity, and retry once. They do not rewrite the profile. No or ambiguous identity matches fail closed. The Node backend remains pinned to the exact selected private HomeBase IP; cloud/TCP/HTTP/fetch guards remain active. This discovery identity check is not cryptographic authentication of broadcast replies. To persist an endpoint change, `configure --host` (directed) or `configure --from-discovery` requires a unique matching configured-station reply. For changing response ports, optional `--discover` looks up the current endpoint before status/refresh/motion. Reject it with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
 
-## Daily record counts
+## Activity dates and unresolved event totals
 
 ```sh
-eufy events counts --json
-eufy events counts --since YYYY-MM-DD --json
+eufy events days --json
+eufy events days --since YYYY-MM-DD --json
 ```
 
-This read-only LAN query returns `counts` entries with `date` and `count`, plus `scope:homebase` and `complete:false`. Default range: seven calendar days; explicit start: at most 30 days ago; maximum: 31 daily buckets. It reports the HomeBase database's counts, not verified counts of every motion detection/notification. Dates preserve the HomeBase's reported calendar dates; its timezone has not been independently verified. Do not invent zeroes for missing days or infer a complete per-doorbell total. `--device` and `--source cache` are refused because counts cover the whole HomeBase. Count retrieval is live verified on macOS for the documented pair; Windows counts are unverified.
+This read-only LAN query returns dates reported by the HomeBase. Default range: seven calendar days; explicit start: at most 30 days ago; maximum: 31 buckets. Dates preserve the reported calendar dates; the HomeBase timezone is not independently verified. Results cover the whole HomeBase, so `--device` and `--source cache` are refused.
 
-Exact timestamped event records remain unresolved. The local-record query can return empty despite nonempty daily counts; an alternate date-based record query did not respond. Never present those empty records as zero events. Event/count commands use the saved endpoint without automatic recovery; an endpoint change can be maintained with identity-matched `configure --from-discovery`. Counts do not access cloud services, media, app files or modify device state. Keep dates/counts private unless sharing is authorized.
+The raw protocol field called `count` has not been reconciled with app events. A returned value of 1 must not be reported as one event; the app may show several on that day. Text output shows dates only. JSON retains `counts` entries with `date` and raw `count` for compatibility, plus `count_meaning:unverified`, `event_totals_available:false`, `scope:homebase` and `complete:false`. Never sum raw values as event totals, invent zeroes for missing dates, or infer per-doorbell completeness. `events counts` remains an alias with these same limits.
+
+Exact timestamped records remain unresolved. Single-day local queries return explicit empty lists across tested storage/video/compression options; alternate date-based queries, including a station-wide device list, have not responded. The separate device counter has no requested date range and cannot establish daily totals. Raising `--limit` does not fix missing retrieval. Event queries use the saved endpoint without automatic recovery; maintain a moved endpoint with identity-matched `configure --from-discovery`. No cloud services, media, app files or device writes are used. Date retrieval is live verified on macOS for the documented pair; Windows remains unverified. Keep activity metadata private unless sharing is authorized.
 
 ## Portable session/profile transfer
 
@@ -74,7 +76,7 @@ Preserve existing profiles by default. Use import `--replace` only for an author
 ## Limits and private diagnostics
 
 - Live validated on T8210 + T8010: fresh motion status on macOS and Windows, and motion changes on macOS. Windows motion writes and other models/firmware are unverified.
-- Timestamped/complete event history is unresolved. HomeBase-wide reported daily record counts are available, with completeness unverified. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
+- Timestamped/complete event history is unresolved. HomeBase-wide activity dates are available; numeric event totals are unverified. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
 - The Node transport is pinned to one selected private IPv4 HomeBase address; separate bounded discovery can broadcast during setup, explicit lookup, or safe automatic connection recovery. This does not establish that the HomeBase itself never contacts cloud services.
 - Never disclose the config, app archives, tokens/keys, serials, account/P2P identifiers, private addresses, personal paths or event contents in public artifacts. `discover` can display LAN addresses; aliases and setup paths can also be personal. Share only suitably redacted errors/booleans/model/version information.
 - Do not add fresh cloud login, encrypted-video enrollment, resets, deletions or device/account/network changes as incidental troubleshooting. Explain the supported limitation and preserve the user's requested scope.

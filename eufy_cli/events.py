@@ -247,9 +247,10 @@ def read_local_events(
             counts.append({"date": date, "count": count})
         return {
             "source": "local_station_daily_counts", "scope": "homebase", "complete": False,
+            "count_meaning": "unverified", "event_totals_available": False,
             "counts": sorted(counts, key=lambda row: row["date"], reverse=True),
             "start_date": query["startDate"], "end_date": query["endDate"],
-            "note": "HomeBase-wide reported records, not a complete per-doorbell event log. Missing days are unknown, not zero.",
+            "note": "HomeBase-reported dates and raw numeric values. Numeric values are not verified event totals and may differ from the app. Missing days are unknown, not zero.",
         }
     events = normalize_records(
         result,
@@ -262,7 +263,7 @@ def read_local_events(
     return {
         "source": "local_station_history",
         "cached": False,
-        "authoritative_history": True,
+        "authoritative_history": False,
         "complete": False,
         "device_alias": device.alias,
         "events": events,
