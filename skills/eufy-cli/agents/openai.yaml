@@ -1,5 +1,5 @@
 interface:
   display_name: "Eufy CLI"
-  short_description: "Local Eufy doorbell status and motion control"
+  short_description: "Eufy doorbell motion control and recording times"
 policy:
   allow_implicit_invocation: true

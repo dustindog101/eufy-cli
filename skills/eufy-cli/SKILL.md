@@ -1,15 +1,31 @@
 ---
 name: eufy-cli
-description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read local recording times and HomeBase-reported activity dates, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
+description: Control Eufy doorbell motion and read recording times for agent and personal-assistant requests, such as checking motion status, turning detection off, or listing yesterday's events. Use for Eufy CLI setup and LAN troubleshooting. Applies to T8210/T8010; video, playback, other settings and complete app event history are unavailable.
 ---
 
 # Eufy CLI
 
 Use installed `eufy` for the user's requested supported action. It sends local P2P commands to a HomeBase using private standalone identifiers, with no runtime login, app-file reads or Eufy cloud API calls. Initial identifiers must already be configured. Treat the config as private even though it contains no passwords or login tokens.
 
+## Route the user's request
+
+| Request | Command | Report |
+| --- | --- | --- |
+| Is motion detection on? | `eufy status --json` | Fresh `device.live_motion.value`, only if available |
+| Turn motion detection off/on | `eufy motion off --json` / `eufy motion on --json` | Requested state only after `fresh:true` verification |
+| Show today's/yesterday's recording times | `eufy events today --json` / `eufy events yesterday --json` | Chronological returned records and any partial-result reason |
+| What happened the day before yesterday? | `eufy events day-before-yesterday --json` | Recording timestamps, not descriptions of video contents |
+| Times for a specific day | `eufy events YYYY-MM-DD --json` | Use the user's intended calendar date |
+| How many recordings that day? | The corresponding `events DAY --json` | `count` is records returned; say if truncated or app coverage is unverified |
+| Which recent days had activity? | `eufy events days --json` | Report dates; do not turn raw date-query values into event totals |
+
+Use the existing configured device when unambiguous. Resolve ambiguous dates or devices only when they change the requested result. Don't ask for permission to perform a read already requested, or re-confirm an authorized motion change. "Turn off the doorbell" still needs clarification because it may mean power/chime instead of motion. Requests for event images, descriptions, playback or video are unsupported; do not infer them from recording metadata.
+
+Present a short answer with the date, returned count and requested times. Read JSON rather than parsing human text. Exit 2 and `ok:false` mean failure; exit 130 means interruption. Never present an error as a device state or empty history. Read `truncated`, `partial_reason`, `query_exhausted` and `timezone_verified` before describing completeness or clock meaning. A user-confirmed matching app timestamp establishes that sample only, not the HomeBase's timezone or daylight-saving rules.
+
 ## Find and inspect
 
-- Check `command -v eufy`, then `eufy --version`, `eufy limits` and, when relevant, `eufy help COMMAND`.
+- Check `command -v eufy`, then `eufy --version`, `eufy limits` and, when relevant, `eufy help COMMAND`. Offline guides: `eufy help setup`, `eufy help troubleshooting`, `eufy help agents`. Nested command help works as `eufy help session import`.
 - If missing, use the user's checkout or the installation instructions in the repository README: https://github.com/dustindog101/eufy-cli. Python3.11+, Node22+ and npm are required; keep launcher and backend together in the source checkout.
 - On Windows, use `python bin/eufy COMMAND` or `bin\eufy.cmd COMMAND` from the source checkout; `Get-Command eufy` checks PATH. Help/tests/config ACLs, LAN discovery, and repeated fresh motion reads have been validated on Windows. Windows motion writes have not been live tested. Use plain `status` for fresh motion; normal connection failures automatically trigger one identity-matched lookup and safe retry. `status --discover` or `refresh --discover` can look up the current endpoint first when ports change often. Discovered endpoints are used only in memory. Automatic recovery has synthetic regression coverage, not live Windows validation. The backend stays pinned to the selected HomeBase IP. Do not infer account expiry or change firewall/routes incidentally. Use `session export FILE` and `session import FILE` to transfer a previously configured profile privately; Windows cannot perform the Mac app import. Do not transfer a profile to another machine without authorization.
 - `eufy devices` shows aliases and models. Use `--device ALIAS` when the user names a device or selection is ambiguous.

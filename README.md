@@ -74,6 +74,10 @@ eufy events day-before-yesterday
 eufy events YYYY-MM-DD       # Recording times for a specific day
 eufy events days             # HomeBase-reported activity dates, last 7 days
 eufy help motion
+eufy help session import
+eufy help setup
+eufy help troubleshooting
+eufy help agents
 ```
 
 `refresh` is an alias workflow for fresh status; `refresh --cache-only` stays offline. Other metadata remains a saved snapshot. Profiles do not store motion or battery snapshots, so cached state can be unavailable. The older `status --live` syntax remains accepted.
@@ -202,16 +206,33 @@ Other models/firmware are unverified. The local key derives from station serial 
 
 Recording queries allow at most 200 records, 12 pages and a start date at most 30 days ago. Partial results are explicitly marked; empty output does not prove no events. Complete app event coverage and encrypted recording access are unavailable.
 
-## Agent skill
+## Help
 
-The [Eufy CLI skill](skills/eufy-cli/SKILL.md) lets compatible agents use these commands. Install it in your agent's skill directory; for Codex:
+`eufy`, `eufy help` and `eufy --help` show the same concise command overview. Each command's help includes examples. Use either `eufy help events` or `eufy events --help`; nested help works too, such as `eufy help session import`.
+
+The offline guides `eufy help setup`, `eufy help troubleshooting` and `eufy help agents` cover first use, connection/permission recovery, and assistant integration. Help works without a profile, Node.js, app access or a device connection. Syntax errors show the relevant usage and help command without echoing arbitrary argument values. `--json` is for command results and errors; help stays readable text.
+
+Legacy `--shared-admin` and experimental `events --source cache` remain accepted for compatibility and documented here, but are hidden from ordinary help. Everyday motion uses saved legitimate permission confirmation; ordinary events read the HomeBase.
+
+## Agent and personal-assistant skill
+
+The [Eufy CLI skill](skills/eufy-cli/SKILL.md) maps natural-language requests to commands and explains result verification, permissions, event pagination, clock interpretation and private-data handling. It supports requests such as:
+
+- "Is motion detection on?"
+- "Turn motion detection off."
+- "Show recording times from the day before yesterday."
+- "How many recordings came back for that day?"
+
+Install the complete skill folder in your assistant's skill directory. For Codex:
 
 ```sh
 mkdir -p "$HOME/.codex/skills"
 cp -R skills/eufy-cli "$HOME/.codex/skills/"
 ```
 
-Reload/restart the agent if needed. CLI dependencies and the private profile are installed separately; the skill contains no identifiers or credentials.
+Reload/restart the agent if needed. Other assistants with Markdown skill support can use the same `SKILL.md` with access to the installed CLI; no connector, daemon or API service is required. Follow that assistant's skill-discovery convention. The optional `agents/openai.yaml` provides Codex UI metadata and keeps automatic discovery enabled.
+
+CLI dependencies and the private profile are installed separately; the skill contains no identifiers or credentials. Do not place the private profile inside the skill or repository. Agents should use `--json`, leave requested motion changes in place after fresh verification, and report partial recording results accurately. The skill does not implement scheduled monitoring or send event data to other services.
 
 ## Development
 

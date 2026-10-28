@@ -77,6 +77,6 @@ class SessionCliTests(unittest.TestCase):
     def test_session_help_is_available_without_configuration(self):
         for argv in [['help', 'session'], ['session', 'export', '--help'], ['session', 'import', '--help']]:
             with self.subTest(argv=argv):
-                with self.assertRaises(SystemExit) as result:
-                    self.call(argv)
-                self.assertEqual(result.exception.code, 0)
+                code, output = self.call(argv)
+                self.assertEqual(code, 0)
+                self.assertIn('usage: eufy session', output)

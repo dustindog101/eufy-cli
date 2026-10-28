@@ -14,6 +14,7 @@ from .backend import BackendError, build_payload, run_backend
 from .cache import AppCache
 from .discovery import DiscoveryError, discover
 from .events import EventError, parse_calendar_since, parse_since, read_cache_events, read_local_events
+from .help_text import EXAMPLES, GUIDES
 from . import local_config, session_transfer
 
 
@@ -25,14 +26,18 @@ class CliError(RuntimeError):
 
 class ArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
         super().__init__(*args, **kwargs)
+        topic = self.prog.removeprefix("eufy ")
+        if topic in EXAMPLES:
+            self.epilog = "Examples:\n" + "\n".join("  " + line if line else "" for line in EXAMPLES[topic].splitlines())
         self.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                           help="output JSON for scripts")
 
     def error(self, message):
         # argparse can echo arbitrary argument values. Keep errors private and
         # useful, including when JSON was requested for an invalid invocation.
-        raise CliError("invalid_arguments", "Command not recognized or incomplete. Run eufy help or eufy help COMMAND.")
+        raise CliError("invalid_arguments", f"Invalid or incomplete command.\n{self.format_usage().rstrip()}\nRun {self.prog} --help for examples.")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,13 +52,14 @@ def _parser() -> argparse.ArgumentParser:
 
 First use: eufy configure --from-app (Mac), or eufy session import FILE.
 If the app shows Admin/Owner: eufy configure --confirm-admin (once).
-Use --json for scripts. Use eufy help COMMAND for more options.
+Use --json for scripts. Use eufy help COMMAND for examples.
+Guides: eufy help setup / eufy help troubleshooting / eufy help agents
 Supports T8210 + T8010 motion control; video and other settings unavailable.""",
     )
     parser.add_argument("--version", action="version", version=f"eufy {__version__}")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     help_command = commands.add_parser("help", help="show help")
-    help_command.add_argument("topic", nargs="?", choices=("devices", "status", "refresh", "discover", "events", "motion", "limits", "configure", "session"))
+    help_command.add_argument("topic", nargs="*", metavar="TOPIC", help="command path or setup, troubleshooting, agents (e.g. session import)")
     commands.add_parser("devices", help="list configured devices (offline)")
     status = commands.add_parser("status", help="check fresh motion status",
         description="Read fresh motion status over LAN. Other metadata stays saved. A single configured doorbell is selected automatically.")
@@ -65,17 +71,12 @@ Supports T8210 + T8010 motion control; video and other settings unavailable.""",
         mode.add_argument("--cache-only", action="store_true", help="show saved metadata without network access")
         command.add_argument("--discover", action="store_true", help="look up the identity-matched HomeBase before connecting")
     motion = commands.add_parser("motion", help="turn motion detection on or off",
-        description="Change motion detection and verify fresh device readback. Leaves the requested state in place; already-matching state sends no setter.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""If the app shows Admin/Owner, confirm once:
-  eufy configure --confirm-admin
-Guest access cannot change settings.
-If acknowledgement/readback fails, check eufy status before another write.""")
+        description="Change motion detection and verify fresh device readback. Leaves the requested state in place; already-matching state sends no setter.")
     motion.add_argument("action", choices=("on", "off"))
     motion.add_argument("--device", help="device alias, when selection is ambiguous")
     motion.add_argument("--dry-run", action="store_true", help="preview permission and target without network access")
     motion.add_argument("--discover", action="store_true", help="look up the identity-matched HomeBase before connecting")
-    motion.add_argument("--shared-admin", action="store_true", help="assert confirmed Admin access for this invocation only")
+    motion.add_argument("--shared-admin", action="store_true", help=argparse.SUPPRESS)
     configure = commands.add_parser("configure", help="one-time setup and permission confirmation",
         description="Use saved app identifiers on Mac, or maintain an existing private profile. No login, cloud calls or camera setting changes.")
     source = configure.add_mutually_exclusive_group(required=True)
@@ -98,14 +99,14 @@ If acknowledgement/readback fails, check eufy status before another write.""")
     discovery = commands.add_parser("discover", help="look for HomeBases on your LAN")
     discovery.add_argument("--host", help="private IPv4 address for directed lookup")
     discovery.add_argument("--timeout", type=float, default=2.0, help="reply window, 0.1–10 seconds (default: 2)")
-    commands.add_parser("limits", help="show supported features (offline)")
+    commands.add_parser("limits", help="show supported features (offline)", description="Show implemented features, validation limits and connection budgets without contacting a device.")
     events = commands.add_parser("events", help="list recording times for a day",
-        description="List local recording times: eufy events yesterday, eufy events day-before-yesterday, or eufy events YYYY-MM-DD. Defaults to today. Reads up to 200 records with pagination; partial results are marked. Times preserve the HomeBase clock; its timezone and full app-list completeness are unverified. Video playback/download is unavailable.")
+        description="List local recording times in chronological order. Defaults to today. Video playback/download is unavailable.")
     events.add_argument("view", nargs="?", metavar="DAY", help="today, yesterday, day-before-yesterday, YYYY-MM-DD, or days (activity dates)")
     events.add_argument("--device", help="device alias")
     events.add_argument("--limit", type=int, default=200, help="maximum recordings, 1–200 (default: 200)")
     events.add_argument("--since", help="first calendar date (YYYY-MM-DD), up to 30 days ago")
-    events.add_argument("--source", choices=("local", "cache"), default="local")
+    events.add_argument("--source", choices=("local", "cache"), default="local", help=argparse.SUPPRESS)
     return parser
 
 
@@ -394,11 +395,19 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         if args.command is None or args.command == "help":
             if getattr(args, "topic", None):
-                parser.parse_args([args.topic, "--help"])
+                if len(args.topic) == 1 and args.topic[0] in GUIDES:
+                    sys.stdout.write(GUIDES[args.topic[0]])
+                elif args.topic[0] == "help":
+                    parser.print_help()
+                else:
+                    parser.parse_args([*args.topic, "--help"])
             else:
                 parser.print_help()
             return 0
         return emit(run(args), json_output=json_output)
+    except SystemExit as exc:
+        # argparse's --help/--version are successful, offline invocations.
+        return int(exc.code)
     except CliError as exc:
         return emit({"ok": False, "error": {"code": exc.code, "message": str(exc)}}, json_output=json_output, code=2)
     except KeyboardInterrupt:
