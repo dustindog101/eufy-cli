@@ -172,6 +172,20 @@ if (-not $valid) { exit 3 }
         with self.assertRaises(local_config.LocalConfigError): local_config.save_from_device(self.device, self.path, replace=True)
         self.assertEqual(self.path.read_bytes(), original)
 
+    def test_admin_confirmation_is_validated_and_reimport_clears_it(self):
+        local_config.save_from_device(self.device, self.path)
+        local_config.confirm_admin(confirmed=True, path=self.path)
+        self.assertTrue(local_config.load(self.path).select(None).admin_confirmed)
+        confirmed = json.loads(self.path.read_text())
+        for permissions in (True, {}, {'admin_confirmed': 'true'}, {'admin_confirmed': False},
+                            {'admin_confirmed': True, 'role': 'admin'}):
+            with self.subTest(permissions=permissions):
+                invalid = {**confirmed, 'permissions': permissions}
+                with self.assertRaises(local_config.LocalConfigError):
+                    local_config._validate(invalid)
+        local_config.save_from_device(self.device, self.path, replace=True)
+        self.assertFalse(local_config.load(self.path).select(None).admin_confirmed)
+
     def test_host_update_matches_station_without_reading_app(self):
         local_config.save_from_device(self.device, self.path)
         before = json.loads(self.path.read_text())

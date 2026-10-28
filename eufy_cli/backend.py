@@ -23,9 +23,10 @@ RFC1918_NETWORKS = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8",
 
 
 class BackendError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, retry_safe: bool = False):
         super().__init__(message)
         self.code = code
+        self.retry_safe = retry_safe
 
 
 def _member(station: dict[str, Any]) -> dict[str, Any]:
@@ -55,7 +56,7 @@ def _str(value: Any) -> str | None:
 
 def build_payload(device: CachedDevice, operation: str, *, query: dict[str, Any] | None = None, motion_value: bool | None = None) -> dict[str, Any]:
     """Create the small, explicit bridge schema. This object can contain secrets."""
-    if operation not in {"events.local", "motion.get", "motion.set"}:
+    if operation not in {"events.local", "events.counts", "motion.get", "motion.set"}:
         raise BackendError("unsupported_operation", "requested local operation is unavailable")
     station = device.station
     if not isinstance(station, dict):
@@ -176,7 +177,7 @@ def run_backend(payload: dict[str, Any], *, timeout_seconds: float = 20.0) -> di
             "PROPERTY_UNAVAILABLE": "station returned no fresh motion state",
             "WRITE_ACK_TIMEOUT": "motion acknowledgement timed out; setting may have changed, check status --live",
             "WRITE_READBACK_UNAVAILABLE": "motion was acknowledged but readback failed; check status --live",
-            "WRITE_READBACK_MISMATCH": "fresh motion state did not match the requested setting",
+            "WRITE_READBACK_MISMATCH": "fresh motion state did not match the requested setting; check eufy status before another write",
             "LOCAL_TIMEOUT": "local station query timed out",
             "LOCAL_CONNECT_FAILED": "could not establish a local station connection",
             "CACHED_SESSION_EXPIRED": "cached local station key has expired",
@@ -184,5 +185,6 @@ def run_backend(payload: dict[str, Any], *, timeout_seconds: float = 20.0) -> di
         }.get(code, "local station query failed")
         if isinstance(return_code, int) and not isinstance(return_code, bool):
             message = f"local station rejected the command (code {return_code})"
-        raise BackendError(code, message)
+        retry_safe = isinstance(details, dict) and details.get('retrySafe') is True
+        raise BackendError(code, message, retry_safe=retry_safe)
     return response

@@ -52,11 +52,17 @@ def _peer_port(value: Any) -> int:
 
 
 def _validate(data: Any) -> dict[str, Any]:
-    if not isinstance(data, dict) or set(data) != {'version', 'alias', 'role', 'station', 'device'} or data.get('version') != 1:
+    required = {'version', 'alias', 'role', 'station', 'device'}
+    if not isinstance(data, dict) or set(data) not in (required, required | {'permissions'}) or type(data.get('version')) is not int or data['version'] != 1:
         raise LocalConfigError('Local config schema is invalid')
     _text(data['alias'])
     if data['role'] not in ('admin', 'guest', 'unknown'):
         raise LocalConfigError('Local config role is invalid')
+    if 'permissions' in data:
+        permissions = data['permissions']
+        if (not isinstance(permissions, dict) or set(permissions) != {'admin_confirmed'}
+                or permissions['admin_confirmed'] is not True or data['role'] == 'guest'):
+            raise LocalConfigError('Local config permission confirmation is invalid')
     station, device = data['station'], data['device']
     if not isinstance(station, dict) or set(station) not in (STATION_FIELDS, STATION_FIELDS | OPTIONAL_STATION_FIELDS) or not isinstance(device, dict) or set(device) != DEVICE_FIELDS:
         raise LocalConfigError('Local config metadata schema is invalid')
@@ -185,8 +191,28 @@ def load(path: Path | None = None) -> AppCache:
     # Reuse inventory selection/alias functions, without loading any app file.
     cache = AppCache(group_container=path.parent)
     cache.metadata_source = 'standalone_config'
-    cache.devices = [CachedDevice(data['device']['device_sn'], data['device'], data['station'], data['role'], mtime, data['alias'], 'standalone_config')]
+    cache.devices = [CachedDevice(data['device']['device_sn'], data['device'], data['station'], data['role'], mtime, data['alias'], 'standalone_config', data.get('permissions', {}).get('admin_confirmed', False))]
     return cache
+
+
+def confirm_admin(*, confirmed: bool, path: Path | None = None) -> Path:
+    """Record the user's app permission assertion for this exact private profile.
+
+    The imported role and all device/account identities stay intact. Reimporting
+    identifiers replaces the profile and clears this assertion.
+    """
+    path = config_path(path)
+    try:
+        data = _validate(json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError, KeyError):
+        raise LocalConfigError('A valid local profile is required before confirming permission') from None
+    if confirmed:
+        if data['role'] == 'guest':
+            raise LocalConfigError('Guest permission cannot change settings; ask the owner for Admin access')
+        data['permissions'] = {'admin_confirmed': True}
+    else:
+        data.pop('permissions', None)
+    return _save(data, path)
 
 
 def update_host(host: str, path: Path | None = None) -> Path:

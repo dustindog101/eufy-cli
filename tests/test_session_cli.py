@@ -28,7 +28,7 @@ class SessionCliTests(unittest.TestCase):
             stack.enter_context(patch('eufy_cli.cli.discover', side_effect=AssertionError('No discovery')))
             stack.enter_context(patch('eufy_cli.cli.run_backend', side_effect=AssertionError('No device access')))
             stack.enter_context(redirect_stdout(output))
-            code = main(argv)
+            code = main(["--json", *argv])
         return code, output.getvalue()
 
     def test_cli_roundtrip_is_offline_and_output_contains_no_profile_values(self):
@@ -77,6 +77,6 @@ class SessionCliTests(unittest.TestCase):
     def test_session_help_is_available_without_configuration(self):
         for argv in [['help', 'session'], ['session', 'export', '--help'], ['session', 'import', '--help']]:
             with self.subTest(argv=argv):
-                with self.assertRaises(SystemExit) as result:
-                    self.call(argv)
-                self.assertEqual(result.exception.code, 0)
+                code, output = self.call(argv)
+                self.assertEqual(code, 0)
+                self.assertIn('usage: eufy session', output)

@@ -8,6 +8,10 @@ import {
   createDiagnostics,
   disposeStation,
   executeRequest,
+  errorResponse,
+  getLocalEvents,
+  getHistory,
+  requestHistoryPage,
   installEgressGuards,
   isPrivateIPv4,
   makeOfflineApi,
@@ -15,9 +19,11 @@ import {
   primePeerOnListen,
   normalizeStationDeviceType,
   sanitizeEventRecords,
+  sanitizeDailyCounts,
+  setMotionAndVerify,
   udpDestination,
 } from '../src/local-backend.mjs';
-import { CommandName, DeviceType, Station } from 'eufy-security-client';
+import { CommandName, CommandType, DeviceType, Station } from 'eufy-security-client';
 
 function request(overrides = {}) {
   const stationSN = 'station-fixture';
@@ -311,5 +317,255 @@ test('peer flow is primed once on the SDK socket before lookup and keeps the pin
   } finally {
     guard.restore();
     dgram.Socket.prototype.send = originalSend;
+  }
+});
+
+test('write attempt tracking distinguishes original-read failure from a possible setter send', async () => {
+  const device = request().device;
+  const station = new EventEmitter();
+  station.isConnected = () => true;
+  const state = { attempted: false };
+  station.getCameraInfo = () => {};
+  station.setMotionDetection = () => { throw new Error('possible send before SDK failure'); };
+  await assert.rejects(
+    setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 20, state),
+    (error) => error.code === 'PROPERTY_UNAVAILABLE',
+  );
+  assert.equal(state.attempted, false);
+  station.getCameraInfo = () => queueMicrotask(() => station.emit('raw device property changed', device.device_sn, { 1011: { value: '1', source: 'p2p' } }));
+  await assert.rejects(
+    setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 1000, state),
+    (error) => error.code === 'LOCAL_COMMAND_FAILED',
+  );
+  assert.equal(state.attempted, true);
+  assert.equal(station.listenerCount('command result'), 0);
+});
+
+test('readback mismatch and missing ACK retain write-attempt state and clear listeners', async () => {
+  const device = request().device;
+  for (const ack of [true, false]) {
+    const station = new EventEmitter();
+    station.isConnected = () => true;
+    station.getCameraInfo = () => queueMicrotask(() => station.emit('raw device property changed', device.device_sn, { 1011: { value: '1', source: 'p2p' } }));
+    let writes = 0;
+    station.setMotionDetection = () => {
+      writes += 1;
+      if (ack) queueMicrotask(() => station.emit('command result', station, { channel: 0, return_code: 0, customData: { property: { name: 'motionDetection' } } }));
+    };
+    const state = { attempted: false };
+    await assert.rejects(
+      setMotionAndVerify(station, device, makeOfflineApi(), false, Date.now() + 50, state),
+      (error) => error.code === (ack ? 'WRITE_READBACK_MISMATCH' : 'WRITE_ACK_TIMEOUT'),
+    );
+    assert.equal(state.attempted, true);
+    assert.equal(writes, 1);
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('raw device property changed'), 0);
+  }
+});
+
+test('bridge error carries explicit safe-retry proof only when provided by the operation', () => {
+  const error = new BackendError('LOCAL_TIMEOUT', 'connection timed out');
+  assert.equal(errorResponse(error).error.details?.retrySafe, undefined);
+  error.retrySafe = false;
+  assert.equal(errorResponse(error).error.details.retrySafe, false);
+  error.retrySafe = true;
+  assert.equal(errorResponse(error).error.details.retrySafe, true);
+});
+
+test('daily count sanitizer exposes reported calendar dates/counts only and rejects invalid buckets', () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28) };
+  const row = { day: new Date(2026, 9, 27), count: 4, device_sn: 'synthetic-serial', secret: 'omit-me' };
+  assert.deepEqual(sanitizeDailyCounts([row], query), [{ date: '2026-10-27', count: 4 }]);
+  assert.deepEqual(sanitizeDailyCounts([], query), []);
+  for (const rows of [null, [row, row], Array(32).fill(row), [{ ...row, day: new Date('invalid') }],
+    [{ ...row, day: new Date(2026, 9, 19) }], [{ ...row, count: -1 }], [{ ...row, count: true }], [{ ...row, count: '4' }]]) {
+    assert.throws(() => sanitizeDailyCounts(rows, query), (error) => error.code === 'INVALID_LOCAL_RESPONSE');
+  }
+});
+
+test('daily count query is read-only and requires its own acknowledgement plus successful response', async () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28), maxItems: 20 };
+  for (const ackFirst of [true, false]) {
+    const station = new EventEmitter();
+    station.hasCommand = (name) => name === CommandName.StationDatabaseCountByDate;
+    station.isConnected = () => true;
+    station.databaseCountByDate = (start, end) => {
+      assert.equal(start, query.startDate);
+      assert.equal(end, query.endDate);
+      queueMicrotask(() => {
+        station.emit('command result', station, { return_code: -1, customData: { command: { name: 'unrelated' } } });
+        const ack = () => station.emit('command result', station, { return_code: 0, customData: { command: { name: CommandName.StationDatabaseCountByDate } } });
+        const data = () => station.emit('database count by date', station, 0, [{ day: new Date(2026, 9, 27), count: 4 }]);
+        if (ackFirst) { ack(); data(); } else { data(); ack(); }
+      });
+    };
+    const result = await getLocalEvents(station, request().device, query, Date.now() + 1000, true);
+    assert.deepEqual(result, { counts: [{ date: '2026-10-27', count: 4 }], scope: 'homebase', complete: false, source: 'local-p2p' });
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('database count by date'), 0);
+  }
+});
+
+test('daily counts reject errors and timeouts instead of presenting false zero totals', async () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28), maxItems: 20 };
+  for (const mode of ['unacknowledged', 'rejected', 'db-not-ready']) {
+    const station = new EventEmitter();
+    station.hasCommand = () => true;
+    station.isConnected = () => true;
+    station.databaseCountByDate = () => queueMicrotask(() => {
+      if (mode !== 'unacknowledged') station.emit('command result', station, { return_code: mode === 'rejected' ? -1 : 0, customData: { command: { name: CommandName.StationDatabaseCountByDate } } });
+      station.emit('database count by date', station, mode === 'db-not-ready' ? -1100 : 0, []);
+    });
+    await assert.rejects(getLocalEvents(station, request().device, query, Date.now() + 30, true),
+      (error) => ['LOCAL_TIMEOUT', 'LOCAL_COMMAND_FAILED', 'LOCAL_QUERY_FAILED'].includes(error.code));
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('database count by date'), 0);
+  }
+  const countRequest = request({ operation: 'events.counts' });
+  assert.equal(normalizeInput(countRequest).operation, 'events.counts');
+  countRequest.query.startDate = '2025-01-01';
+  assert.throws(() => normalizeInput(countRequest), (error) => error.code === 'INVALID_DATE_RANGE');
+});
+
+function historyRecord(id, minute = id) {
+  return {
+    record_id: id, device_sn: 'doorbell-fixture', station_sn: 'station-fixture',
+    history: { start_time: new Date(2026, 9, 10, 6, minute), end_time: new Date(2026, 9, 10, 6, minute, 10), storage_path: '/private/omit' },
+  };
+}
+
+function historyStation(rows, handler) {
+  const station = new EventEmitter();
+  station.rawStation = request().station.raw;
+  station.isConnected = () => true;
+  station.hasCommand = (name) => name === CommandName.StationDatabaseQueryLocal;
+  station.sent = [];
+  station.p2pSession = { sendCommandWithStringPayload(command, customData) {
+    const body = JSON.parse(command.value);
+    station.sent.push(body);
+    assert.equal(command.commandType, CommandType.CMD_SET_PAYLOAD);
+    assert.equal(body.cmd, CommandType.CMD_DATABASE);
+    assert.equal(body.payload.cmd, CommandType.CMD_DATABASE_QUERY_LOCAL);
+    assert.equal(body.account_id, 'fixture-account');
+    assert.deepEqual(body.payload.payload.device_info, [{ device_sn: 'doorbell-fixture' }]);
+    assert.equal(body.payload.payload.storage_cloud, 0);
+    const ack = () => station.emit('command result', station, { return_code: 0, customData });
+    const data = (records) => station.emit('database query local', station, 0, records);
+    queueMicrotask(() => {
+      if (handler) return handler({ station, body, ack, data });
+      const cursor = body.payload.payload.start_time;
+      const compact = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      data(rows.filter((r) => compact(r.history.start_time) < cursor).sort((a, b) => b.history.start_time - a.history.start_time).slice(0, 20));
+      ack();
+    });
+  } };
+  return station;
+}
+const dayQuery = () => ({ startDate: new Date(2026, 9, 10), endDate: new Date(2026, 9, 10), maxItems: 200 });
+
+function assertHistoryListenersCleared(station) {
+  assert.equal(station.listenerCount('command result'), 0);
+  assert.equal(station.listenerCount('database query local'), 0);
+}
+
+test('history retrieves multiple pages with overlap, preserves wall times and strips private metadata', async () => {
+  const station = historyStation(Array.from({ length: 35 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 35);
+  assert.equal(result.events[0].timestamp, '2026-10-10T06:00:00');
+  assert.equal(result.events.at(-1).timestamp, '2026-10-10T06:34:00');
+  assert.equal(result.query_exhausted, true);
+  assert.equal(result.complete, false);
+  assert.equal(result.truncated, false);
+  assert.equal(result.timezone_verified, false);
+  assert.equal(result.pages, 2);
+  assert.equal(station.sent[0].payload.payload.start_time, '20261011000000');
+  assert.equal(station.sent[0].payload.payload.start_date, '20261010');
+  assert.equal(station.sent[0].payload.payload.end_date, '20261011');
+  assert.equal(station.sent[1].payload.payload.start_time, '20261010061501');
+  assert.equal(JSON.stringify(result).includes('fixture'), false);
+  assert.equal(JSON.stringify(result).includes('/private'), false);
+  assertHistoryListenersCleared(station);
+});
+
+test('history requires its own transaction ACK even when data arrives first', async () => {
+  const station = historyStation([], ({ station, ack, data }) => {
+    station.emit('command result', station, { return_code: 0, customData: { command: { name: CommandName.StationDatabaseQueryLocal, value: { transaction: 'other' } } } });
+    data([]);
+    setTimeout(ack, 10);
+  });
+  const result = await requestHistoryPage(station, request().device, dayQuery(), '20261011000000', 'query-fixture', Date.now() + 1000);
+  assert.deepEqual(result, []);
+  assertHistoryListenersCleared(station);
+});
+
+test('history limit returns the newest records and marks omitted records', async () => {
+  const station = historyStation(Array.from({ length: 25 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, { ...dayQuery(), maxItems: 5 }, Date.now() + 1000);
+  assert.equal(result.events.length, 5);
+  assert.equal(result.events[0].timestamp, '2026-10-10T06:20:00');
+  assert.equal(result.truncated, true);
+  assert.equal(result.query_exhausted, false);
+  assert.equal(result.partial_reason, 'limit');
+  assert.equal(station.sent.length, 1);
+});
+
+test('same-second page boundary cannot silently skip additional recordings or loop', async () => {
+  const station = historyStation(Array.from({ length: 21 }, (_, i) => historyRecord(i, 0)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 20);
+  assert.equal(result.truncated, true);
+  assert.equal(result.query_exhausted, false);
+  assert.equal(result.partial_reason, 'cursor_stalled');
+  assert.equal(station.sent.length, 2);
+  assertHistoryListenersCleared(station);
+});
+
+test('history rejects wrong identities, invalid timestamps and out-of-day responses', async () => {
+  for (const row of [
+    { ...historyRecord(1), device_sn: 'other-doorbell' },
+    { ...historyRecord(1), station_sn: 'other-homebase' },
+    { ...historyRecord(1), history: { start_time: new Date('invalid'), end_time: new Date() } },
+    { ...historyRecord(1), history: { start_time: new Date(2026, 9, 9), end_time: new Date(2026, 9, 9) } },
+  ]) {
+    const station = historyStation([], ({ ack, data }) => { ack(); data([row]); });
+    await assert.rejects(getHistory(station, request().device, dayQuery(), Date.now() + 1000), (error) => error.code === 'INVALID_LOCAL_RESPONSE');
+    assertHistoryListenersCleared(station);
+  }
+});
+
+test('history marks later-page timeout as partial, but a first-page timeout is an error', async () => {
+  for (const first of [true, false]) {
+    const station = historyStation([], ({ station, ack, data }) => {
+      if (first || station.sent.length > 1) return;
+      ack(); data(Array.from({ length: 20 }, (_, i) => historyRecord(i)));
+    });
+    const promise = getHistory(station, request().device, dayQuery(), Date.now() + 30);
+    if (first) await assert.rejects(promise, (error) => error.code === 'LOCAL_TIMEOUT');
+    else {
+      const result = await promise;
+      assert.equal(result.events.length, 20);
+      assert.equal(result.truncated, true);
+      assert.equal(result.partial_reason, 'timeout');
+    }
+    assertHistoryListenersCleared(station);
+  }
+});
+
+test('history handles empty results honestly and caps paginated results at 200', async () => {
+  const empty = await getHistory(historyStation([]), request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(empty.query_exhausted, true);
+  assert.equal(empty.complete, false);
+  assert.deepEqual(empty.events, []);
+  const station = historyStation(Array.from({ length: 400 }, (_, i) => historyRecord(i)));
+  const result = await getHistory(station, request().device, dayQuery(), Date.now() + 1000);
+  assert.equal(result.events.length, 200);
+  assert.equal(result.truncated, true);
+  assert.equal(result.partial_reason, 'limit');
+  assert.ok(station.sent.length <= 12);
+  assertHistoryListenersCleared(station);
+  for (const maxItems of [0, 201, true]) {
+    assert.throws(() => normalizeInput({ ...request(), query: { ...request().query, maxItems } }), (error) => error.code === 'INVALID_REQUEST');
   }
 });

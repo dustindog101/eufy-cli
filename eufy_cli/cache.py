@@ -228,6 +228,7 @@ class CachedDevice:
     cache_mtime: float
     alias: str = ""
     metadata_source: str = "app_cache"
+    admin_confirmed: bool = False
 
     @property
     def model(self) -> str | None:
@@ -245,6 +246,7 @@ class CachedDevice:
             "hardware": fields.get("hardware"),
             "category": fields.get("category"),
             "role": self.role,
+            "admin_confirmed": self.admin_confirmed,
             "capabilities": fields["capabilities"],
             "status": fields["status"],
             "cache": {
