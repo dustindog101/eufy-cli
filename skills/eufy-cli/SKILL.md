@@ -1,6 +1,6 @@
 ---
 name: eufy-cli
-description: Use the Eufy CLI to answer questions about a configured Eufy doorbell, check fresh motion detection status, enable or disable motion detection, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to the CLI's supported T8210/T8010 pair; live video, event playback and other settings are not implemented.
+description: Use the Eufy CLI to check fresh motion status, enable or disable motion detection, read HomeBase-reported daily record counts, transfer a private profile between trusted machines, and troubleshoot local setup or discovery. Applies to T8210/T8010; complete event history, live video, playback and other settings are unavailable.
 ---
 
 # Eufy CLI
@@ -47,7 +47,18 @@ eufy refresh --cache-only
 
 Setup imports only the needed identifiers from existing saved Mac app metadata into an owner-private config outside the checkout. It does not log in. Do this for an authorized setup request; preserve an existing config unless replacement is requested. `--replace` explicitly reimports identifiers. Normal commands never fall back to the app if config is missing or invalid.
 
-Normal commands try the saved endpoint first. On a safe connection failure, they perform one bounded 2-second broadcast, require one endpoint matching the configured station identity, and retry once. They do not rewrite the profile. No or ambiguous identity matches fail closed. The Node backend remains pinned to the exact selected private HomeBase IP; cloud/TCP/HTTP/fetch guards remain active. This discovery identity check is not cryptographic authentication of broadcast replies. To persist an endpoint change, `configure --host` (directed) or `configure --from-discovery` requires a unique matching configured-station reply. For changing response ports, optional `--discover` looks up the current endpoint before status/refresh/motion. Reject it with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
+Live status and motion commands try the saved endpoint first. On a safe connection failure, they perform one bounded 2-second broadcast, require one endpoint matching the configured station identity, and retry once. They do not rewrite the profile. No or ambiguous identity matches fail closed. The Node backend remains pinned to the exact selected private HomeBase IP; cloud/TCP/HTTP/fetch guards remain active. This discovery identity check is not cryptographic authentication of broadcast replies. To persist an endpoint change, `configure --host` (directed) or `configure --from-discovery` requires a unique matching configured-station reply. For changing response ports, optional `--discover` looks up the current endpoint before status/refresh/motion. Reject it with cached-only status/refresh. It does not change network settings or access the app. Discovery alone cannot bootstrap all serial/account/channel identifiers needed for control. A local key has no known login-session expiry timer on the tested path, but future device/firmware/permission/network changes can break access.
+
+## Daily record counts
+
+```sh
+eufy events counts --json
+eufy events counts --since YYYY-MM-DD --json
+```
+
+This read-only LAN query returns `counts` entries with `date` and `count`, plus `scope:homebase` and `complete:false`. Default range: seven calendar days; explicit start: at most 30 days ago; maximum: 31 daily buckets. It reports the HomeBase database's counts, not verified counts of every motion detection/notification. Dates preserve the HomeBase's reported calendar dates; its timezone has not been independently verified. Do not invent zeroes for missing days or infer a complete per-doorbell total. `--device` and `--source cache` are refused because counts cover the whole HomeBase. Count retrieval is live verified on macOS for the documented pair; Windows counts are unverified.
+
+Exact timestamped event records remain unresolved. The local-record query can return empty despite nonempty daily counts; an alternate date-based record query did not respond. Never present those empty records as zero events. Event/count commands use the saved endpoint without automatic recovery; an endpoint change can be maintained with identity-matched `configure --from-discovery`. Counts do not access cloud services, media, app files or modify device state. Keep dates/counts private unless sharing is authorized.
 
 ## Portable session/profile transfer
 
@@ -63,7 +74,7 @@ Preserve existing profiles by default. Use import `--replace` only for an author
 ## Limits and private diagnostics
 
 - Live validated on T8210 + T8010: fresh motion status on macOS and Windows, and motion changes on macOS. Windows motion writes and other models/firmware are unverified.
-- Event history is unresolved. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
+- Timestamped/complete event history is unresolved. HomeBase-wide reported daily record counts are available, with completeness unverified. Empty local output is not proof there are no events; logs are not a reliable substitute. No live video, encrypted clip playback/download, other settings, snooze or security modes.
 - The Node transport is pinned to one selected private IPv4 HomeBase address; separate bounded discovery can broadcast during setup, explicit lookup, or safe automatic connection recovery. This does not establish that the HomeBase itself never contacts cloud services.
 - Never disclose the config, app archives, tokens/keys, serials, account/P2P identifiers, private addresses, personal paths or event contents in public artifacts. `discover` can display LAN addresses; aliases and setup paths can also be personal. Share only suitably redacted errors/booleans/model/version information.
 - Do not add fresh cloud login, encrypted-video enrollment, resets, deletions or device/account/network changes as incidental troubleshooting. Explain the supported limitation and preserve the user's requested scope.

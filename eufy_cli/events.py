@@ -208,8 +208,11 @@ def read_local_events(
     *,
     since: dt.datetime | None = None,
     limit: int = 20,
+    counts_only: bool = False,
 ) -> dict[str, Any]:
     now = dt.datetime.now(dt.timezone.utc)
+    if counts_only:
+        now = now.astimezone()
     start = since or (now - dt.timedelta(days=30))
     if (now.date() - start.date()).days > 30:
         raise EventError("date_range_too_large", "local station history is limited to a 30-day date range")
@@ -219,11 +222,35 @@ def read_local_events(
         "maxItems": min(limit, 20),
     }
     try:
-        payload = build_payload(device, "events.local", query=query)
+        payload = build_payload(device, "events.counts" if counts_only else "events.local", query=query)
         response = run_backend(payload)
     except BackendError as exc:
         raise EventError(exc.code, str(exc)) from exc
     result = response.get("result", response)
+    if counts_only:
+        if (not isinstance(result, dict) or not isinstance(result.get("counts"), list)
+                or len(result["counts"]) > 31 or result.get("scope") != "homebase"
+                or result.get("source") != "local-p2p"):
+            raise EventError("invalid_counts_response", "HomeBase daily counts were unavailable")
+        counts = []
+        seen = set()
+        for row in result["counts"]:
+            try:
+                date = dt.date.fromisoformat(row["date"]).isoformat()
+                count = row["count"]
+                if (date != row["date"] or date in seen or not query["startDate"] <= date <= query["endDate"]
+                        or type(count) is not int or not 0 <= count <= 2**53 - 1):
+                    raise ValueError
+            except (ValueError, TypeError, KeyError):
+                raise EventError("invalid_counts_response", "HomeBase daily counts were invalid") from None
+            seen.add(date)
+            counts.append({"date": date, "count": count})
+        return {
+            "source": "local_station_daily_counts", "scope": "homebase", "complete": False,
+            "counts": sorted(counts, key=lambda row: row["date"], reverse=True),
+            "start_date": query["startDate"], "end_date": query["endDate"],
+            "note": "HomeBase-wide reported records, not a complete per-doorbell event log. Missing days are unknown, not zero.",
+        }
     events = normalize_records(
         result,
         cache.events_aliases(),

@@ -82,7 +82,7 @@ export function normalizeInput(input) {
     fail('INVALID_REQUEST', 'Expected a version 1 JSON request.');
   }
   const operation = input.operation;
-  if (operation !== 'motion.get' && operation !== 'events.local' && operation !== 'motion.set') {
+  if (!['motion.get', 'events.local', 'events.counts', 'motion.set'].includes(operation)) {
     fail('UNSUPPORTED_OPERATION', 'Unsupported local operation.');
   }
   if (input.role !== 'guest' && input.role !== 'admin' && input.role !== 'unknown') {
@@ -135,7 +135,7 @@ export function normalizeInput(input) {
   }
 
   let query;
-  if (operation === 'events.local') {
+  if (operation === 'events.local' || operation === 'events.counts') {
     if (!isPlainObject(input.query)) fail('INVALID_REQUEST', 'A date range is required for local event history.');
     const startDate = parseLocalDate(input.query.startDate, 'start date');
     const endDate = parseLocalDate(input.query.endDate, 'end date');
@@ -221,6 +221,24 @@ export function sanitizeEventRecords(records, limit = MAX_HISTORY_ITEMS) {
       frameCount,
     }];
   }).slice(0, limit);
+}
+
+export function sanitizeDailyCounts(records, query) {
+  if (!Array.isArray(records) || records.length > 31) fail('INVALID_LOCAL_RESPONSE', 'Daily counts response was invalid.');
+  const seen = new Set();
+  const counts = records.map((record) => {
+    const day = record?.day;
+    if (!(day instanceof Date) || !Number.isFinite(day.getTime()) || !Number.isSafeInteger(record.count) || record.count < 0) {
+      fail('INVALID_LOCAL_RESPONSE', 'Daily counts response was invalid.');
+    }
+    // The SDK parses the reported calendar date as local midnight. Preserve
+    // that date rather than shifting it through a UTC conversion.
+    const date = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    if (day < query.startDate || day > query.endDate || seen.has(date)) fail('INVALID_LOCAL_RESPONSE', 'Daily counts response was invalid.');
+    seen.add(date);
+    return { date, count: record.count };
+  });
+  return counts.sort((a, b) => b.date.localeCompare(a.date));
 }
 
 export function makeOfflineApi(diagnostics) {
@@ -597,8 +615,10 @@ export async function setMotionAndVerify(station, deviceRecord, api, value, dead
   return { ...after, previous: before.enabled, changed: true };
 }
 
-async function getLocalEvents(station, deviceRecord, query, deadline) {
-  if (!station.hasCommand(CommandName.StationDatabaseQueryLocal)) {
+export async function getLocalEvents(station, deviceRecord, query, deadline, countsOnly = false) {
+  const commandName = countsOnly ? CommandName.StationDatabaseCountByDate : CommandName.StationDatabaseQueryLocal;
+  const eventName = countsOnly ? 'database count by date' : 'database query local';
+  if (!station.hasCommand(commandName)) {
     fail('UNSUPPORTED_OPERATION', 'The station does not expose local event history.');
   }
   await waitForStationConnect(station, deadline);
@@ -620,12 +640,12 @@ async function getLocalEvents(station, deviceRecord, query, deadline) {
       settled = true;
       clearTimeout(timer);
       station.off('command result', onCommandResult);
-      station.off('database query local', onQueryResult);
+      station.off(eventName, onQueryResult);
       if (error) reject(error);
       else resolve(value);
     };
     const onCommandResult = (_sourceStation, result) => {
-      if (result?.customData?.command?.name !== CommandName.StationDatabaseQueryLocal) return;
+      if (result?.customData?.command?.name !== commandName) return;
       if (result.return_code !== 0) {
         const rejection = new BackendError('LOCAL_COMMAND_FAILED', 'The local event-history command was not acknowledged.');
         rejection.returnCode = Number.isInteger(result.return_code) ? result.return_code : null;
@@ -647,16 +667,22 @@ async function getLocalEvents(station, deviceRecord, query, deadline) {
     const maybeFinish = () => {
       if (!commandAcknowledged || !queryReceived) return;
       try {
-        const events = sanitizeEventRecords(records, query.maxItems);
-        finish(null, { events, count: events.length, source: 'local-p2p' });
+        if (countsOnly) {
+          finish(null, { counts: sanitizeDailyCounts(records, query), scope: 'homebase', complete: false, source: 'local-p2p' });
+        } else {
+          const events = sanitizeEventRecords(records, query.maxItems);
+          finish(null, { events, count: events.length, source: 'local-p2p' });
+        }
       } catch {
         finish(new BackendError('INVALID_LOCAL_RESPONSE', 'The local event-history response was invalid.'));
       }
     };
     station.on('command result', onCommandResult);
-    station.on('database query local', onQueryResult);
+    station.on(eventName, onQueryResult);
     try {
-      station.databaseQueryLocal(
+      if (countsOnly) {
+        station.databaseCountByDate(query.startDate, query.endDate);
+      } else station.databaseQueryLocal(
         [deviceRecord.device_sn],
         query.startDate,
         query.endDate,
@@ -688,7 +714,7 @@ export async function executeRequest(input) {
     } else if (request.operation === 'motion.get') {
       result = await getFreshMotion(station, request.device, api, deadline);
     } else {
-      result = await getLocalEvents(station, request.device, request.query, deadline);
+      result = await getLocalEvents(station, request.device, request.query, deadline, request.operation === 'events.counts');
     }
     if (egress.denied.length > 0) fail('NETWORK_BLOCKED', 'A non-local network destination was blocked.');
     return { ok: true, result, diagnostics: diagnostics.snapshot(station, egress.denied.length) };

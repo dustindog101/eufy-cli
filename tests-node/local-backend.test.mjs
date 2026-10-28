@@ -9,6 +9,7 @@ import {
   disposeStation,
   executeRequest,
   errorResponse,
+  getLocalEvents,
   installEgressGuards,
   isPrivateIPv4,
   makeOfflineApi,
@@ -16,6 +17,7 @@ import {
   primePeerOnListen,
   normalizeStationDeviceType,
   sanitizeEventRecords,
+  sanitizeDailyCounts,
   setMotionAndVerify,
   udpDestination,
 } from '../src/local-backend.mjs';
@@ -367,4 +369,59 @@ test('bridge error carries explicit safe-retry proof only when provided by the o
   assert.equal(errorResponse(error).error.details.retrySafe, false);
   error.retrySafe = true;
   assert.equal(errorResponse(error).error.details.retrySafe, true);
+});
+
+test('daily count sanitizer exposes reported calendar dates/counts only and rejects invalid buckets', () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28) };
+  const row = { day: new Date(2026, 9, 27), count: 4, device_sn: 'synthetic-serial', secret: 'omit-me' };
+  assert.deepEqual(sanitizeDailyCounts([row], query), [{ date: '2026-10-27', count: 4 }]);
+  assert.deepEqual(sanitizeDailyCounts([], query), []);
+  for (const rows of [null, [row, row], Array(32).fill(row), [{ ...row, day: new Date('invalid') }],
+    [{ ...row, day: new Date(2026, 9, 19) }], [{ ...row, count: -1 }], [{ ...row, count: true }], [{ ...row, count: '4' }]]) {
+    assert.throws(() => sanitizeDailyCounts(rows, query), (error) => error.code === 'INVALID_LOCAL_RESPONSE');
+  }
+});
+
+test('daily count query is read-only and requires its own acknowledgement plus successful response', async () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28), maxItems: 20 };
+  for (const ackFirst of [true, false]) {
+    const station = new EventEmitter();
+    station.hasCommand = (name) => name === CommandName.StationDatabaseCountByDate;
+    station.isConnected = () => true;
+    station.databaseCountByDate = (start, end) => {
+      assert.equal(start, query.startDate);
+      assert.equal(end, query.endDate);
+      queueMicrotask(() => {
+        station.emit('command result', station, { return_code: -1, customData: { command: { name: 'unrelated' } } });
+        const ack = () => station.emit('command result', station, { return_code: 0, customData: { command: { name: CommandName.StationDatabaseCountByDate } } });
+        const data = () => station.emit('database count by date', station, 0, [{ day: new Date(2026, 9, 27), count: 4 }]);
+        if (ackFirst) { ack(); data(); } else { data(); ack(); }
+      });
+    };
+    const result = await getLocalEvents(station, request().device, query, Date.now() + 1000, true);
+    assert.deepEqual(result, { counts: [{ date: '2026-10-27', count: 4 }], scope: 'homebase', complete: false, source: 'local-p2p' });
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('database count by date'), 0);
+  }
+});
+
+test('daily counts reject errors and timeouts instead of presenting false zero totals', async () => {
+  const query = { startDate: new Date(2026, 9, 20), endDate: new Date(2026, 9, 28), maxItems: 20 };
+  for (const mode of ['unacknowledged', 'rejected', 'db-not-ready']) {
+    const station = new EventEmitter();
+    station.hasCommand = () => true;
+    station.isConnected = () => true;
+    station.databaseCountByDate = () => queueMicrotask(() => {
+      if (mode !== 'unacknowledged') station.emit('command result', station, { return_code: mode === 'rejected' ? -1 : 0, customData: { command: { name: CommandName.StationDatabaseCountByDate } } });
+      station.emit('database count by date', station, mode === 'db-not-ready' ? -1100 : 0, []);
+    });
+    await assert.rejects(getLocalEvents(station, request().device, query, Date.now() + 30, true),
+      (error) => ['LOCAL_TIMEOUT', 'LOCAL_COMMAND_FAILED', 'LOCAL_QUERY_FAILED'].includes(error.code));
+    assert.equal(station.listenerCount('command result'), 0);
+    assert.equal(station.listenerCount('database count by date'), 0);
+  }
+  const countRequest = request({ operation: 'events.counts' });
+  assert.equal(normalizeInput(countRequest).operation, 'events.counts');
+  countRequest.query.startDate = '2025-01-01';
+  assert.throws(() => normalizeInput(countRequest), (error) => error.code === 'INVALID_DATE_RANGE');
 });

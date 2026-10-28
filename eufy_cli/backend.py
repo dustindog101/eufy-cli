@@ -56,7 +56,7 @@ def _str(value: Any) -> str | None:
 
 def build_payload(device: CachedDevice, operation: str, *, query: dict[str, Any] | None = None, motion_value: bool | None = None) -> dict[str, Any]:
     """Create the small, explicit bridge schema. This object can contain secrets."""
-    if operation not in {"events.local", "motion.get", "motion.set"}:
+    if operation not in {"events.local", "events.counts", "motion.get", "motion.set"}:
         raise BackendError("unsupported_operation", "requested local operation is unavailable")
     station = device.station
     if not isinstance(station, dict):

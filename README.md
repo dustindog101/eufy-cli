@@ -69,6 +69,7 @@ eufy motion off --dry-run     # Offline permission/target preview
 eufy devices                 # Saved device list
 eufy status --cache-only      # Saved metadata, no fresh device state
 eufy limits                  # Support limits, no network
+eufy events counts           # HomeBase-reported daily counts, last 7 days
 eufy help motion
 ```
 
@@ -76,9 +77,21 @@ eufy help motion
 
 Motion changes require a fresh original state, a correlated command acknowledgement and an independent fresh readback. Already-matching state returns without sending a setter. Normal commands leave the requested state; an explicitly requested validation must restore its original state. On acknowledgement/readback/bridge failure, state may be uncertain: check `eufy status` before another write. The CLI never blindly retries a possible write.
 
+### Daily record counts
+
+```sh
+eufy events counts
+eufy events counts --since YYYY-MM-DD
+eufy events counts --json
+```
+
+These commands read the HomeBase's daily record-count query over LAN, without changing settings. The default range is seven calendar days; an explicit start date can be at most 30 days ago. The response contains at most 31 daily buckets. Counts are **HomeBase-wide**, not filtered to the selected doorbell, so `--device` and `--source cache` are refused. Dates are the HomeBase's reported calendar dates; its timezone has not been independently verified. Count output contains only dates and reported counts.
+
+Daily count retrieval has been live verified on the documented pair on macOS. These are reported recording/database counts, not a verified complete count of motion detections or notifications. Missing days remain unknown; the CLI does not fill them with zero. Timestamped event history remains unresolved: the local-record query can return empty even when the separate count query reports records, and the tested date-based record query did not respond. No exact event-time log or complete per-doorbell totals are claimed.
+
 ### LAN connection handling
 
-Stay on the HomeBase LAN. Normal commands try the saved address first, keeping working connections quick. A connection timeout/failure triggers one bounded LAN lookup and one retry at a **unique endpoint matching the configured station identity**. For motion changes, recovery is allowed only when the backend explicitly confirms no setter was attempted. No match, ambiguous matches, command rejection, uncertain writes, or failed readback cannot trigger repeated writes.
+Stay on the HomeBase LAN. Live status and motion commands try the saved address first, keeping working connections quick. A connection timeout/failure triggers one bounded LAN lookup and one retry at a **unique endpoint matching the configured station identity**. For motion changes, recovery is allowed only when the backend explicitly confirms no setter was attempted. No match, ambiguous matches, command rejection, uncertain writes, or failed readback cannot trigger repeated writes. Event/count queries use the saved endpoint; if it has moved, refresh it with `configure --from-discovery`.
 
 Recovery uses the matched IP/UDP response port in memory, preserving the private profile and exact device/account identities. To save a changed address explicitly:
 
@@ -153,6 +166,7 @@ Mac-to-Windows private import/export and repeated fresh status with explicit dis
 | Automatic connection recovery; consumer UX | Synthetic regression coverage; do not infer live recovery from fixtures |
 | Offline profile export/import | Mac-to-Windows round-trip and fresh Windows status validated |
 | Event history | Unresolved: local queries can return empty despite app events |
+| HomeBase-reported daily record counts | Live verified on macOS; HomeBase-wide, completeness/per-doorbell attribution unverified |
 | Live video, recording playback/download, other settings, snooze, security modes | Not implemented |
 | Fresh provisioning from discovery alone | Not implemented |
 
